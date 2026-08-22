@@ -22,6 +22,17 @@ class Settings(BaseSettings):
     mongodb_uri: str = ""
     mongodb_db: str = "businessintelligence"
 
+    # uploaded CSV storage. Local disk is convenient for development only;
+    # production uses MongoDB GridFS by default, with S3-compatible storage
+    # available when a dedicated object store is needed.
+    object_storage_backend: str = "local"  # local | gridfs | s3
+    object_storage_bucket: str = ""
+    object_storage_region: str = "auto"
+    object_storage_endpoint_url: str = ""
+    object_storage_access_key_id: str = ""
+    object_storage_secret_access_key: str = ""
+    object_storage_prefix: str = "datasets"
+
     # auth
     firebase_project_id: str = ""
     google_application_credentials: str = ""
@@ -61,6 +72,28 @@ class Settings(BaseSettings):
             or self.google_application_credentials.strip()
         )
         return "firebase" if has_creds else "demo"
+
+    def production_errors(self) -> List[str]:
+        """Return configuration errors that must stop a production boot."""
+        if self.app_env.lower() != "production":
+            return []
+        errors: List[str] = []
+        if self.db_backend != "mongo" or not self.mongodb_uri:
+            errors.append("production requires DB_BACKEND=mongo and MONGODB_URI")
+        if self.auth_mode != "firebase":
+            errors.append("production requires AUTH_MODE=firebase")
+        if not (self.firebase_service_account_json.strip() or self.google_application_credentials.strip()):
+            errors.append("production requires Firebase Admin credentials")
+        if self.object_storage_backend == "gridfs":
+            pass
+        elif self.object_storage_backend == "s3" and self.object_storage_bucket:
+            pass
+        else:
+            errors.append("production requires OBJECT_STORAGE_BACKEND=gridfs or a configured S3 bucket")
+        if not self.cors_origin_list or any(origin == "*" or not origin.startswith("https://")
+                                             for origin in self.cors_origin_list):
+            errors.append("production CORS_ORIGINS must contain explicit HTTPS origins")
+        return errors
 
 
 @lru_cache
