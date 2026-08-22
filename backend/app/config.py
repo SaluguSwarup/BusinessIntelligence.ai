@@ -14,8 +14,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
-    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
-
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,https://business-intelligence-ai.vercel.app"
     # database
     db_backend: str = "json"          # json | mongo
     data_dir: str = "./data"
