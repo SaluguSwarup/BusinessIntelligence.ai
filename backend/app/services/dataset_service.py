@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import uuid
 from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
@@ -10,6 +11,7 @@ import pandas as pd
 from ..config import get_settings
 from ..db.repositories import DatasetRepository
 from ..engines.metrics import DatasetSchema, detect_schema, prepare
+from .object_storage import get_object_storage
 
 _CACHE: Dict[str, Tuple[float, pd.DataFrame, DatasetSchema]] = {}
 
@@ -52,17 +54,16 @@ def store_upload(uid: str, filename: str, raw: bytes) -> Dict[str, Any]:
     schema = validate_and_describe(df)
 
     digest = hashlib.sha256(raw).hexdigest()[:16]
-    user_dir = os.path.join(s.upload_dir, uid)
-    os.makedirs(user_dir, exist_ok=True)
     safe_name = os.path.basename(filename).replace(" ", "_") or "dataset.csv"
-    path = os.path.join(user_dir, f"{digest}_{safe_name}")
-    with open(path, "wb") as fh:
-        fh.write(raw)
+    # A unique key ensures deleting one repeated upload cannot remove another.
+    key = f"{s.object_storage_prefix.strip('/')}/{uid}/{digest}_{uuid.uuid4().hex[:12]}_{safe_name}"
+    get_object_storage().put(key, raw)
 
     repo = DatasetRepository()
     meta = {
         "filename": safe_name,
-        "path": path,
+        "storage_key": key,
+        "storage_backend": s.object_storage_backend,
         "size_bytes": len(raw),
         "checksum": digest,
         "schema": schema.to_dict(),
@@ -74,24 +75,27 @@ def store_upload(uid: str, filename: str, raw: bytes) -> Dict[str, Any]:
 
 
 def load(dataset: Dict[str, Any]) -> Tuple[pd.DataFrame, DatasetSchema]:
-    """Load + prepare a dataset, cached on (path, mtime)."""
-    path = dataset["path"]
-    if not os.path.exists(path):
-        raise DatasetError("The stored dataset file is missing. Please re-upload it.")
-    mtime = os.path.getmtime(path)
-    cached = _CACHE.get(path)
-    if cached and cached[0] == mtime:
+    """Load + prepare a dataset, cached by immutable dataset checksum."""
+    key = dataset.get("storage_key")
+    if not key:  # legacy local records, retained to avoid breaking development data
+        key = dataset.get("path", "")
+    cache_key = dataset.get("checksum") or key
+    cached = _CACHE.get(cache_key)
+    if cached:
         return cached[1], cached[2]
-
-    df_raw = pd.read_csv(path)
+    try:
+        raw = get_object_storage().get(key) if dataset.get("storage_key") else open(key, "rb").read()
+    except (OSError, FileNotFoundError) as exc:
+        raise DatasetError("The stored dataset file is missing. Please re-upload it.") from exc
+    df_raw = read_csv_bytes(raw)
     schema = detect_schema(df_raw)
     df = prepare(df_raw, schema)
-    _CACHE[path] = (mtime, df, schema)
+    _CACHE[cache_key] = (0.0, df, schema)
     return df, schema
 
 
-def clear_cache(path: Optional[str] = None) -> None:
-    if path:
-        _CACHE.pop(path, None)
+def clear_cache(key: Optional[str] = None) -> None:
+    if key:
+        _CACHE.pop(key, None)
     else:
         _CACHE.clear()
