@@ -14,6 +14,7 @@ from ..rag.chunker import chunk_document
 from ..rag.extract import extract_text, guess_doc_type
 from ..rag.retriever import Retriever, invalidate
 from ..services import dataset_service
+from ..services.object_storage import get_object_storage
 from .paths import SAMPLE_CSV, SAMPLE_DOCS_DIR, SAMPLE_TEMPLATE
 
 router = APIRouter(prefix="/api", tags=["data"])
@@ -94,7 +95,9 @@ def delete_dataset(dataset_id: str, user: Dict[str, Any] = Depends(current_user)
     ds = repo.get(user["uid"], dataset_id)
     if not ds:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Dataset not found.")
-    dataset_service.clear_cache(ds.get("path"))
+    dataset_service.clear_cache(ds.get("checksum") or ds.get("storage_key") or ds.get("path"))
+    if ds.get("storage_key"):
+        get_object_storage().delete(ds["storage_key"])
     repo.delete(user["uid"], dataset_id)
     return {"deleted": dataset_id}
 

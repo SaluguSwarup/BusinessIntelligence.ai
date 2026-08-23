@@ -71,8 +71,10 @@ def _init_firebase() -> bool:
 
 def auth_mode() -> str:
     mode = get_settings().resolved_auth_mode
-    if mode == "firebase" and not _init_firebase():
-        return "demo"
+    # An explicitly selected production mode must never silently degrade to
+    # unauthenticated demo-token handling because credentials are broken.
+    if mode == "firebase":
+        _init_firebase()
     return mode
 
 

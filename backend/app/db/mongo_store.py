@@ -57,6 +57,13 @@ class MongoDocumentStore(DocumentStore):
 
         self.client = MongoClient(uri, serverSelectionTimeoutMS=5000)
         self.db = self.client[db_name]
+        # Queries are always tenant-scoped; these indexes keep the common
+        # per-user lists and RAG corpus reads predictable as data grows.
+        self.db.users.create_index("uid", unique=True)
+        self.db.datasets.create_index([("uid", 1), ("created_at", -1)])
+        self.db.documents.create_index([("uid", 1), ("created_at", -1)])
+        self.db.doc_chunks.create_index([("uid", 1), ("document_id", 1)])
+        self.db.investigations.create_index([("uid", 1), ("created_at", -1)])
 
     def collection(self, name: str) -> MongoCollection:
         return MongoCollection(self.db[name])
