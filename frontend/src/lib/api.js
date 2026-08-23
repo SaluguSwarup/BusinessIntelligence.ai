@@ -54,6 +54,16 @@ async function request(path, { method = 'GET', body, form, signal } = {}) {
   return data
 }
 
+/** Build a query string from the params that were actually supplied. */
+function qs(params) {
+  const search = new URLSearchParams()
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') search.set(key, value)
+  })
+  const encoded = search.toString()
+  return encoded ? `?${encoded}` : ''
+}
+
 function safeJson(text) {
   try {
     return JSON.parse(text)
@@ -95,6 +105,42 @@ export const api = {
   deleteDocument: (id) => request(`/api/documents/${id}`, { method: 'DELETE' }),
   searchDocuments: (query, topK = 5) =>
     request('/api/documents/search', { method: 'POST', body: { query, top_k: topK } }),
+
+  // kpi contract — the authoritative KPI definitions for a dataset
+  kpiContract: (datasetId) => request(`/api/kpi/contract${qs({ dataset_id: datasetId })}`),
+  kpiProposals: (datasetId) => request(`/api/kpi/contract/proposals${qs({ dataset_id: datasetId })}`),
+  kpiDiscover: ({ datasetId, useLlm = true } = {}) =>
+    request('/api/kpi/contract/discover', {
+      method: 'POST',
+      body: { dataset_id: datasetId ?? null, use_llm: useLlm },
+    }),
+  kpiCreate: (payload, datasetId) =>
+    request(`/api/kpi/contract/kpis${qs({ dataset_id: datasetId })}`, { method: 'POST', body: payload }),
+  kpiUpdate: (kpiId, patch, datasetId) =>
+    request(`/api/kpi/contract/kpis/${kpiId}${qs({ dataset_id: datasetId })}`, {
+      method: 'PATCH',
+      body: { patch },
+    }),
+  kpiDelete: (kpiId, datasetId) =>
+    request(`/api/kpi/contract/kpis/${kpiId}${qs({ dataset_id: datasetId })}`, { method: 'DELETE' }),
+  kpiApprove: (kpiId, datasetId) =>
+    request(`/api/kpi/contract/kpis/${kpiId}/approve${qs({ dataset_id: datasetId })}`, { method: 'POST' }),
+  kpiReject: (kpiId, reason, datasetId) =>
+    request(`/api/kpi/contract/kpis/${kpiId}/reject${qs({ dataset_id: datasetId })}`, {
+      method: 'POST',
+      body: { reason },
+    }),
+  kpiPreview: (kpiId, datasetId) =>
+    request(`/api/kpi/contract/kpis/${kpiId}/preview${qs({ dataset_id: datasetId })}`, { method: 'POST' }),
+  kpiResolveConflict: (conflictId, optionId, rationale, datasetId) =>
+    request(`/api/kpi/contract/conflicts/${conflictId}/resolve${qs({ dataset_id: datasetId })}`, {
+      method: 'POST',
+      body: { option_id: optionId, rationale },
+    }),
+  kpiApproveContract: (datasetId) =>
+    request(`/api/kpi/contract/approve${qs({ dataset_id: datasetId })}`, { method: 'POST' }),
+  kpiVersions: (datasetId) => request(`/api/kpi/contract/versions${qs({ dataset_id: datasetId })}`),
+  kpiLibrary: (datasetId) => request(`/api/kpi/library${qs({ dataset_id: datasetId })}`),
 
   // analysis
   dashboard: ({ year, quarter, kpi, comparison } = {}) => {

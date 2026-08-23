@@ -66,7 +66,10 @@ export default function TimeframePicker({
             onChange={(e) => onChange({ kpi: e.target.value })}
           >
             {kpiOptions.map((k) => (
-              <option key={k.key} value={k.key}>{k.label}</option>
+              <option key={k.key} value={k.key}>
+                {k.label}
+                {k.granularity ? ` · ${k.granularity}` : ''}
+              </option>
             ))}
           </select>
         </div>

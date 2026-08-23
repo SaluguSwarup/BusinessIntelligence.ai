@@ -43,6 +43,63 @@ CONTEST        What would disprove it?         adversarial checks
 ACT            What should we do?              recommendations + monitoring
 ```
 
+### Stage 0 — the KPI CONTRACT (`app/kpi/`)
+
+Before any stage can run, the system has to know what a KPI *is*. That used to be
+a frozen 20-entry dictionary matched to uploaded columns by literal name, which
+meant a hospital dataset got a retail dashboard. The KPI Contract replaces it.
+
+```
+profiling  -> what does each column MEAN?      semantic type, additivity, containment
+library    -> which broadly applicable KPIs does this data support?   binds on CONCEPT
+derivation -> which derived KPIs are semantically valid?              typed rules + data checks
+screening  -> (optional) a model judges semantics; it never computes
+conflicts  -> what is ambiguous, and must a human decide?
+contract   -> the artefact: one versioned, approved document per (user, dataset)
+resolver   -> the artefact, compiled into something that computes
+```
+
+* **Concept binding, not column names.** A library entry declares the concepts it
+  needs (`revenue`, `cost`) with aliases and a required semantic type, so
+  `net_sales`, `turnover` and `billed_amount` all satisfy revenue. **An entry
+  activates only when every concept binds to a real field** — the reason a
+  hospital dataset never grows a gross-margin tile, and the reason the absence is
+  reported (`no field matched the concept 'revenue'`) rather than silent.
+* **Computable is not meaningful.** Any two numeric columns can be divided.
+  A rate is only proposed where the numerator is genuinely contained by the
+  denominator *on the actual rows*, and where the denominator reads as a
+  population rather than as another measure that happens to be bigger. That is
+  what separates `recovered / discharges` from `orders / revenue`. Combinations
+  the rules decline are returned with the reason, so a user can see the system
+  considered them.
+* **Granularity is first-class.** Every KPI declares its entity grain, time grain,
+  native row grain and roll-up policy. A ratio's policy is
+  `recompute_from_components`, never `mean`: averaging four weekly margins is not
+  the quarterly margin. A grain that was inferred but not confirmed blocks
+  approval, because a KPI compared at the wrong grain is simply wrong.
+* **Ambiguity is never silently resolved.** Two definitions of one name, a
+  concept two columns match equally well, a hierarchy whose members roll up to
+  two parents, a rate whose containment fails on the rows — each becomes a
+  `blocking` conflict that prevents approval until a person chooses and records
+  why. The rationale lands in the provenance of every KPI it touched.
+* **Formulas are parsed, never executed.** Definitions arrive from the API as
+  text and are compiled into a small typed AST over an allowlist of column names.
+  There is no `eval`.
+* **The LLM judges, it does not compute.** Screening sees column names, semantic
+  types and summary statistics — never a row. Every proposal it makes is
+  re-validated against the field list; one naming a column that does not exist is
+  discarded. With no API key the deterministic rules decide alone and everything
+  is marked for review.
+
+**Migration.** A dataset with no contract is given a `provisional` one generated
+from the library, marked as never reviewed. The test suite asserts it reproduces
+the old registry's numbers value-for-value, for every KPI in every quarter, so
+making the contract the source of truth changed no number anywhere.
+
+**A draft is not live.** Approving one KPI inside a draft does not change what the
+dashboard shows; the draft goes live only when the contract as a whole is
+approved, which is also when every blocking conflict must have been resolved.
+
 ### Stage 1 — OBSERVE (`app/engines/observe.py`)
 
 **Significance.** The current period-over-period change is scored against the distribution of
@@ -163,9 +220,14 @@ app/
   main.py       application, CORS, routers
   config.py     pydantic-settings; every value has a working default
   deps.py       current_identity → current_user → require_analyst / active_dataset
-  api/          routes_auth · routes_data · routes_analysis · routes_system · redact
-  services/     dataset_service (load + cache) · pipeline (stage orchestration)
+  api/          routes_auth · routes_data · routes_kpi · routes_analysis · routes_system · redact
+  kpi/          contract · profiling · library · derivation · screening · conflicts · resolver · service
+  services/     dataset_service (load + cache + contract) · pipeline (stage orchestration)
 ```
+
+`app/kpi/` depends on nothing in `app/engines/`, so the dependency runs one way:
+the engines resolve KPIs through a compiled contract, and the contract layer knows
+nothing about the four stages.
 
 The pipeline is a **plain deterministic sequence**, not an agent loop. The order of the stages
 is the product's core idea; leaving it to a model to decide would be handing away the thing
@@ -191,8 +253,13 @@ app/db/
   base.py          Collection / DocumentStore interfaces + filter evaluation
   json_store.py    file-backed, atomic writes, thread-safe   (default)
   mongo_store.py   pymongo against a local mongod or Atlas
-  repositories.py  Users · Datasets · Documents · Investigations
+  repositories.py  Users · Datasets · Documents · Investigations · KpiContracts
 ```
+
+KPI contracts are versioned the way datasets are activated: a new document per
+version with `is_current` flipped, never mutation in place. The version that
+produced a saved investigation is still on disk, so an approval is auditable and
+reversible.
 
 **Why a JSON store by default.** A judge, a teammate, or a fresh laptop can run the project
 with `pip install -r requirements.txt` and nothing else. No database server, no connection

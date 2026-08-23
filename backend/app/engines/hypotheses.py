@@ -20,7 +20,8 @@ from typing import Any, Callable, Dict, List, Optional
 import pandas as pd
 
 from .analysis import price_volume_decomposition
-from .metrics import DatasetSchema, compute, metric_label, metric_unit, pct_change, safe
+from .metrics import (DatasetSchema, Resolver, compute, metric_label, metric_unit,
+                      pct_change, safe)
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +37,11 @@ class Context:
     observation: Dict[str, Any]
     focus: Dict[str, str] = field(default_factory=dict)
 
+    @property
+    def resolver(self) -> Optional[Resolver]:
+        """The compiled KPI Contract for this dataset, if it has one."""
+        return self.schema.contract_resolver
+
     # -- availability ------------------------------------------------------
     def has(self, *metrics: str) -> bool:
         return all(m in self.schema.available_kpis for m in metrics)
@@ -43,7 +49,7 @@ class Context:
     # -- measurement -------------------------------------------------------
     def value(self, metric: str, scope: Optional[Dict[str, str]] = None):
         cur, base = self.scoped(scope)
-        return compute(cur, metric), compute(base, metric)
+        return compute(cur, metric, self.resolver), compute(base, metric, self.resolver)
 
     def scoped(self, scope: Optional[Dict[str, str]] = None):
         cur, base = self.cur, self.base
@@ -103,7 +109,7 @@ def evidence(ctx: Context, metric: str, stance: str, scope: Optional[Dict[str, s
     if cur_v != cur_v or base_v != base_v:
         return None
     chg = pct_change(cur_v, base_v)
-    unit = metric_unit(metric)
+    unit = metric_unit(metric, ctx.resolver)
     scope_label = " / ".join(f"{v}" for v in scope.values()) if scope else "whole business"
 
     actual = "up" if (cur_v - base_v) > 0 else ("down" if (cur_v - base_v) < 0 else "flat")
@@ -124,7 +130,7 @@ def evidence(ctx: Context, metric: str, stance: str, scope: Optional[Dict[str, s
         "type": "structured",
         "stance": resolved_stance,
         "metric": metric,
-        "label": metric_label(metric),
+        "label": metric_label(metric, ctx.resolver),
         "scope": scope_label,
         "baseline": safe(base_v),
         "current": safe(cur_v),
@@ -133,7 +139,7 @@ def evidence(ctx: Context, metric: str, stance: str, scope: Optional[Dict[str, s
         "unit": unit,
         "strength": round(strength_of(chg, reference), 3),
         "weight": weight,
-        "detail": (f"{metric_label(metric)} in {scope_label}: "
+        "detail": (f"{metric_label(metric, ctx.resolver)} in {scope_label}: "
                    f"{_fmt(base_v, unit)} → {_fmt(cur_v, unit)} ({delta_txt})."),
         "note": note,
         "source": "Structured data analysis (uploaded dataset)",

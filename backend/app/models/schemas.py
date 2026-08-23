@@ -1,7 +1,7 @@
 """Request/response models — the API contract the frontend develops against."""
 from __future__ import annotations
 
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -50,6 +50,64 @@ class AnalysisRequest(BaseModel):
 class SearchRequest(BaseModel):
     query: str
     top_k: int = Field(default=5, ge=1, le=20)
+
+
+# ---------------------------------------------------------------------------
+# KPI contract
+#
+# Unlike the analysis endpoints, which return `Dict[str, Any]`, the KPI contract
+# is a formal artefact: its shape is the thing downstream systems depend on, so
+# it is typed both ways. The response models are the contract models themselves,
+# in `app.kpi.contract`.
+# ---------------------------------------------------------------------------
+class KpiDiscoverRequest(BaseModel):
+    dataset_id: Optional[str] = None
+    use_llm: bool = Field(default=True,
+                          description="Run LLM semantic screening. Without an API key the "
+                                      "deterministic rules decide on their own.")
+
+
+class KpiUpdateRequest(BaseModel):
+    """A partial override of one KPI definition. Any edit resets its approval."""
+
+    patch: Dict[str, Any] = Field(
+        description="Fields to override, e.g. {'granularity': {...}, 'business_definition': '...'}"
+    )
+
+
+class KpiCreateRequest(BaseModel):
+    """A KPI the business defines itself, which discovery cannot infer."""
+
+    name: str
+    formula: Dict[str, Any] = Field(
+        description="{'kind': 'sum'|'mean'|'ratio', 'expression': '{a} - {b}', "
+                    "'numerator_expression': ..., 'denominator_expression': ..., 'scale': 1.0}"
+    )
+    kpi_id: Optional[str] = None
+    business_definition: str = ""
+    computation_note: str = ""
+    source_fields: List[str] = Field(default_factory=list)
+    dimensions: List[str] = Field(default_factory=list)
+    filters: List[Dict[str, Any]] = Field(default_factory=list)
+    unit: str = "count"
+    higher_is_better: bool = True
+    aggregation: Optional[Dict[str, Any]] = None
+    granularity: Optional[Dict[str, Any]] = None
+    time_semantics: Optional[Dict[str, Any]] = None
+    business_rules: List[Dict[str, Any]] = Field(default_factory=list)
+    validation_rules: List[Dict[str, Any]] = Field(default_factory=list)
+    relevance: str = ""
+    semantic_tags: List[str] = Field(default_factory=list)
+
+
+class KpiRejectRequest(BaseModel):
+    reason: str = ""
+
+
+class ConflictResolveRequest(BaseModel):
+    option_id: str
+    rationale: str = Field(default="", description="Why this resolution was chosen. Kept "
+                                                   "in the provenance of every KPI it touched.")
 
 
 class StageResponse(BaseModel):

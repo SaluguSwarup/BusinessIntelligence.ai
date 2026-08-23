@@ -389,3 +389,106 @@ by mock data, by the deterministic engine, or by the full engine plus the LLM, a
 frontend cannot tell the difference. That is what allowed the frontend, backend and analysis
 work to proceed in parallel — and it is why swapping BM25 for a vector index, or the JSON
 store for Atlas, changes nothing above this line.
+
+---
+
+## KPI contract
+
+The authoritative KPI definitions for a dataset. Reads are open to any signed-in
+user; **every write requires the Data Analyst role** (`manage_kpi_contract`).
+
+Unlike the analysis endpoints, these declare real response models — the contract
+is the artefact downstream systems depend on, so its shape is in `/openapi.json`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/kpi/contract` | The contract being edited (draft if one exists, else live) |
+| `POST` | `/api/kpi/contract/discover` | Profile the data and propose KPIs, as a new draft |
+| `GET` | `/api/kpi/contract/proposals` | Proposals grouped by origin, plus conflicts |
+| `POST` | `/api/kpi/contract/kpis` | Define a KPI yourself |
+| `PATCH` | `/api/kpi/contract/kpis/{id}` | Override any part of a definition |
+| `DELETE` | `/api/kpi/contract/kpis/{id}` | Remove a KPI |
+| `POST` | `/api/kpi/contract/kpis/{id}/preview` | Compute it over recent periods without approving |
+| `POST` | `/api/kpi/contract/kpis/{id}/approve` · `/reject` | Per-KPI decision |
+| `POST` | `/api/kpi/contract/conflicts/{id}/resolve` | Record a human decision on an ambiguity |
+| `POST` | `/api/kpi/contract/approve` | Make the contract authoritative (version++, goes live) |
+| `GET` | `/api/kpi/contract/versions` | Audit history |
+| `GET` | `/api/kpi/library` | Library entries, and which bound to this dataset |
+
+All accept an optional `?dataset_id=` and default to the active dataset.
+
+**Statuses.** A contract is `draft` (under review), `provisional` (generated
+automatically, never reviewed), `approved` (authoritative) or `superseded`.
+A draft is deliberately **not live**: approving one KPI inside it does not change
+what the dashboard shows. The draft goes live only when the contract as a whole
+is approved.
+
+**Refusals.** `409` when a rule blocks the action — a KPI with an unresolved
+blocking conflict, a KPI whose granularity was inferred but never confirmed, or a
+contract with any blocking conflict outstanding. `422` for a malformed formula.
+
+### `GET /api/kpi/contract/proposals`
+
+```json
+{
+  "summary": { "version": 2, "status": "draft", "kpi_count": 25,
+               "counts_by_status": {"proposed": 12, "needs_confirmation": 13},
+               "blocking_conflicts": 0, "approvable": true,
+               "detected_domains": ["general", "retail_ecommerce"] },
+  "groups": {
+    "general_library": [ { "kpi_id": "gross_margin_pct", "name": "Gross margin %",
+      "kpi_type": "general", "status": "needs_confirmation",
+      "business_definition": "Gross profit as a share of revenue.",
+      "formula": { "kind": "ratio", "numerator_expression": "{revenue} - {cost_of_goods}",
+                   "denominator_expression": "{revenue}", "scale": 100.0 },
+      "unit": "percent", "higher_is_better": true,
+      "source_fields": ["revenue", "cost_of_goods"],
+      "granularity": { "entity_grain": [], "time_grain": "week",
+                       "native_row_grain": ["date","region","product","channel","segment"],
+                       "valid_rollups": ["week","month","quarter","year"],
+                       "declared_by": "inferred", "requires_confirmation": true },
+      "aggregation": { "method": "ratio", "rollup_policy": "recompute_from_components" },
+      "time_semantics": { "date_field": "date", "calendar_id": "gregorian",
+                          "comparison_default": "previous_period" },
+      "sources": [ { "dataset_id": "ds_…", "fields": ["revenue","cost_of_goods"],
+                     "native_grain": [...], "refresh_cadence": "weekly" } ],
+      "relevance": "Separates a revenue problem from a pricing or cost problem.",
+      "semantic_tags": ["profitability","efficiency"],
+      "comparability": [ { "kpi_id": "orders", "comparable": true, "reasons": [] } ],
+      "provenance": { "origin": "general_library", "derived_from": ["gross_margin_pct"],
+                      "screened_by": "deterministic" },          // analyst only
+      "confidence": 0.85,                                         // analyst only
+      "approval": { "approved": false, "user_confirmed_granularity": false } } ],
+    "discovered_atomic": [ … ], "discovered_derived": [ … ],
+    "llm_suggested": [ … ],     "user_defined": [ … ]
+  },
+  "conflicts": [ { "conflict_id": "cf_…", "kind": "subset_check_failed",
+                   "severity": "blocking", "detail": "…",
+                   "affected_kpis": ["return_rate"],
+                   "resolution_options": [ {"option_id": "accept", "label": "…"} ],
+                   "resolved": false } ],
+  "unavailable": [ { "library_id": "gross_margin_pct", "name": "Gross margin %",
+                     "why_unavailable": "no field in this dataset matched the concept(s) 'revenue'" } ],
+  "rejected_candidates": [ { "expression": "units_sold / orders", "rule": "outcome_rate",
+                             "reason": "'units_sold' is not contained by 'orders' on the rows…" } ],
+  "field_profiles": [ … ],          // analyst only
+  "screened_by": "deterministic",
+  "analyst_detail_included": true
+}
+```
+
+`conflict.kind` ∈ `duplicate_definition` · `formula_disagreement` · `grain_mismatch` ·
+`calendar_mismatch` · `hierarchy_violation` · `aggregation_ambiguity` ·
+`unit_mismatch` · `source_disagreement` · `subset_check_failed` · `insufficient_history`.
+
+### Effect on the analysis endpoints
+
+`observe` gains two fields, and `kpi_scoreboard` entries gain the same:
+
+```json
+{ "granularity": "company-week", "contract_status": "approved" }
+```
+
+Only **approved** KPIs are authoritative. A dataset with no contract is given a
+`provisional` one generated from the general library, so behaviour is unchanged
+for anything uploaded before this layer existed.

@@ -42,7 +42,7 @@ from .analysis import (
     member_change_table,
     weekly_frame,
 )
-from .metrics import DatasetSchema, metric_label
+from .metrics import DatasetSchema, Resolver, metric_label
 
 CONTRADICTION_QUERIES = {
     "supply_constraint": [
@@ -92,7 +92,8 @@ def _scoped(df: pd.DataFrame, focus: Dict[str, str]) -> pd.DataFrame:
 
 
 def temporal_check(df: pd.DataFrame, kpi: str, hypothesis: Dict[str, Any],
-                   focus: Dict[str, str], window: pd.DataFrame) -> Dict[str, Any]:
+                   focus: Dict[str, str], window: pd.DataFrame,
+                   resolver: Optional[Resolver] = None) -> Dict[str, Any]:
     cause_metric = hypothesis.get("cause_metric")
     if not cause_metric:
         return {
@@ -111,7 +112,7 @@ def temporal_check(df: pd.DataFrame, kpi: str, hypothesis: Dict[str, Any],
     result = compare_onsets(kpi_onset, cause_onset)
     result["lead_lag"] = lead_lag(kpi_weeks, cause_weeks)
     result["cause_metric"] = cause_metric
-    result["cause_metric_label"] = metric_label(cause_metric)
+    result["cause_metric_label"] = metric_label(cause_metric, resolver)
     result["scope"] = " / ".join(focus.values()) if focus else "whole business"
     result["kpi_series"] = kpi_weeks.to_dict("records")
     result["cause_series"] = cause_weeks.to_dict("records")
@@ -136,7 +137,7 @@ def consistency_check(cur: pd.DataFrame, base: pd.DataFrame, schema: DatasetSche
         "status": "checked",
         "dimension": dim,
         "cause_metric": cause_metric,
-        "cause_metric_label": metric_label(cause_metric),
+        "cause_metric_label": metric_label(cause_metric, schema.contract_resolver),
         "correlation": corr,
         "counterexamples": counter,
         "members": [
@@ -406,7 +407,7 @@ def contest(df: pd.DataFrame, schema: DatasetSchema, observation: Dict[str, Any]
     for h in investigation.get("hypotheses", []):
         h = dict(h)
         h["kpi_direction"] = kpi_direction
-        temporal = temporal_check(df, kpi, h, focus, window)
+        temporal = temporal_check(df, kpi, h, focus, window, schema.contract_resolver)
         consistency = consistency_check(cur, base, schema, kpi, h)
         contra_docs = contradictory_retrieval(h, retriever, terms, llm=llm)
         mechanism = mechanism_check(h, temporal)

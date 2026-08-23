@@ -15,7 +15,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from ..config import get_settings
-from .prompts import ACT_SYSTEM, CONTEST_SYSTEM, INVESTIGATE_SYSTEM
+from .prompts import ACT_SYSTEM, CONTEST_SYSTEM, INVESTIGATE_SYSTEM, KPI_DISCOVERY_SYSTEM
 
 log = logging.getLogger(__name__)
 JSON_BLOCK = re.compile(r"\{.*\}", re.S)
@@ -166,6 +166,19 @@ class LLMClient:
         }
         data = self._call(CONTEST_SYSTEM, json.dumps(payload, indent=2, default=str))
         return {v["chunk_id"]: v for v in data.get("verdicts", []) if v.get("chunk_id")}
+
+    def screen_kpi_candidates(self, dataset_facts: Dict[str, Any],
+                              candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Judge which computable metrics are semantically meaningful KPIs.
+
+        The model is handed the dataset's SHAPE — column names, inferred semantic
+        types, summary statistics — and never a single row, so it has nothing to
+        compute a business figure from even if it tried. Its output is re-validated
+        against the field list before anything reaches the contract.
+        """
+        payload = {"dataset": dataset_facts, "candidates": candidates}
+        return self._call(KPI_DISCOVERY_SYSTEM, json.dumps(payload, indent=2, default=str))
 
     def write_story(self, observation: Dict[str, Any], investigation: Dict[str, Any],
                     contested: Dict[str, Any], recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:

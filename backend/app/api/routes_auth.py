@@ -23,6 +23,8 @@ PERMISSIONS = {
         "view_raw_driver_tables": True,
         "search_documents": True,
         "manage_data": True,
+        "manage_kpi_contract": True,       # define, override and approve KPI definitions
+        "view_kpi_contract": True,
     },
     "business_leader": {
         "view_dashboard": True,
@@ -33,6 +35,8 @@ PERMISSIONS = {
         "view_raw_driver_tables": False,
         "search_documents": False,
         "manage_data": True,
+        "manage_kpi_contract": False,      # a leader reads the contract, an analyst owns it
+        "view_kpi_contract": True,
     },
 }
 

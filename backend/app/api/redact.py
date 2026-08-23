@@ -21,9 +21,53 @@ ANALYST_ONLY_SIGNIFICANCE = [
 ]
 ANALYST_ONLY_SCORING = ["score_ledger", "support_score", "against_score", "missing_penalty"]
 
+# A leader reads the KPI Contract to understand what a number means; the machinery
+# that produced the proposal — the row-level checks, the derivation rule, the
+# confidence internals — is analyst detail.
+ANALYST_ONLY_KPI = ["provenance", "confidence", "comparability", "validation_rules"]
+ANALYST_ONLY_CONTRACT = ["field_profiles", "rejected_candidates", "screened_by"]
+
 
 def is_analyst(user: Dict[str, Any]) -> bool:
     return user.get("role") == "data_analyst"
+
+
+def redact_contract(contract: Dict[str, Any], analyst: bool) -> Dict[str, Any]:
+    """
+    Shape a KPI Contract for the reader's role.
+
+    What a KPI *means* — its definition, formula, unit, grain, business rules and
+    approval state — is never hidden: that is the whole point of the contract.
+    Only the derivation machinery is analyst-only.
+
+    Fields are emptied rather than removed, so the response still satisfies the
+    published `KpiContract` schema. A consumer sees the same shape whoever asks;
+    the detail is what changes.
+    """
+    if analyst:
+        return contract
+    out = copy.deepcopy(contract)
+    out["field_profiles"] = []
+    out["rejected_candidates"] = []
+    for kpi in out.get("kpis", []) or []:
+        provenance = kpi.get("provenance") or {}
+        # Where a definition came from is part of trusting it, so the origin and
+        # the fact of review survive even though the evidence behind them does not.
+        kpi["provenance"] = {
+            "origin": provenance.get("origin", "general_library"),
+            "derived_from": [],
+            "derivation_rule": None,
+            "computability_evidence": {},
+            "screened_by": provenance.get("screened_by"),
+            "screening_verdict": None,
+            "created_at": provenance.get("created_at", ""),
+            "edited_by": [],
+            "notes": [],
+        }
+        kpi["comparability"] = []
+        kpi["validation_rules"] = []
+    out["analyst_view_available"] = True
+    return out
 
 
 def redact_observation(observation: Dict[str, Any], analyst: bool) -> Dict[str, Any]:

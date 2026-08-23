@@ -54,8 +54,9 @@ def dashboard(year: Optional[int] = Query(default=None),
               user: Dict[str, Any] = Depends(current_user),
               dataset: Dict[str, Any] = Depends(active_dataset)) -> Dict[str, Any]:
     """Everything the dashboard needs for one (year, quarter) selection."""
-    df, schema = dataset_service.load(dataset)
-    observation = _guard(pipeline.run_observe, dataset, kpi, year, quarter, comparison)
+    df, schema = dataset_service.load(dataset, user["uid"])
+    observation = _guard(pipeline.run_observe, dataset, kpi, year, quarter, comparison,
+                         user["uid"])
     return {
         "dataset": {"id": dataset["_id"], "filename": dataset.get("filename"),
                     "rows": schema.row_count, "grain": schema.grain},
@@ -67,8 +68,9 @@ def dashboard(year: Optional[int] = Query(default=None),
 
 
 @router.get("/meta/timeframes")
-def timeframes(dataset: Dict[str, Any] = Depends(active_dataset)) -> Dict[str, Any]:
-    df, schema = dataset_service.load(dataset)
+def timeframes(user: Dict[str, Any] = Depends(current_user),
+               dataset: Dict[str, Any] = Depends(active_dataset)) -> Dict[str, Any]:
+    df, schema = dataset_service.load(dataset, user["uid"])
     return {"timeframes": available_timeframes(df), "kpis": schema.to_dict()["kpi_catalogue"]}
 
 
@@ -79,7 +81,8 @@ def timeframes(dataset: Dict[str, Any] = Depends(active_dataset)) -> Dict[str, A
 def observe_endpoint(body: AnalysisRequest,
                      user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     ds = _dataset_for(user, body.dataset_id)
-    observation = _guard(pipeline.run_observe, ds, body.kpi, body.year, body.quarter, body.comparison)
+    observation = _guard(pipeline.run_observe, ds, body.kpi, body.year, body.quarter,
+                         body.comparison, user["uid"])
     return {"stage": "observe", "observe": redact_observation(observation, is_analyst(user))}
 
 
@@ -90,8 +93,9 @@ def observe_endpoint(body: AnalysisRequest,
 def investigate_endpoint(body: AnalysisRequest,
                          user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     ds = _dataset_for(user, body.dataset_id)
-    df, schema = dataset_service.load(ds)
-    observation = _guard(pipeline.run_observe, ds, body.kpi, body.year, body.quarter, body.comparison)
+    df, schema = dataset_service.load(ds, user["uid"])
+    observation = _guard(pipeline.run_observe, ds, body.kpi, body.year, body.quarter,
+                         body.comparison, user["uid"])
     llm = get_llm() if body.use_llm else None
     investigation = investigate_stage(df, schema, observation, user["uid"], llm=llm)
     analyst = is_analyst(user)
@@ -107,8 +111,9 @@ def investigate_endpoint(body: AnalysisRequest,
 def contest_endpoint(body: AnalysisRequest,
                      user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     ds = _dataset_for(user, body.dataset_id)
-    df, schema = dataset_service.load(ds)
-    observation = _guard(pipeline.run_observe, ds, body.kpi, body.year, body.quarter, body.comparison)
+    df, schema = dataset_service.load(ds, user["uid"])
+    observation = _guard(pipeline.run_observe, ds, body.kpi, body.year, body.quarter,
+                         body.comparison, user["uid"])
     llm = get_llm() if body.use_llm else None
     investigation = investigate_stage(df, schema, observation, user["uid"], llm=llm)
     contested = contest_stage(df, schema, observation, investigation, user["uid"], llm=llm)
@@ -126,12 +131,14 @@ def contest_endpoint(body: AnalysisRequest,
 def act_endpoint(body: AnalysisRequest,
                  user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     ds = _dataset_for(user, body.dataset_id)
-    df, schema = dataset_service.load(ds)
-    observation = _guard(pipeline.run_observe, ds, body.kpi, body.year, body.quarter, body.comparison)
+    df, schema = dataset_service.load(ds, user["uid"])
+    observation = _guard(pipeline.run_observe, ds, body.kpi, body.year, body.quarter,
+                         body.comparison, user["uid"])
     llm = get_llm() if body.use_llm else None
     investigation = investigate_stage(df, schema, observation, user["uid"], llm=llm)
     contested = contest_stage(df, schema, observation, investigation, user["uid"], llm=llm)
-    action = act_stage(df, observation, investigation, contested, llm=llm)
+    action = act_stage(df, observation, investigation, contested, llm=llm,
+                       resolver=schema.contract_resolver)
     return {"stage": "act", "act": action}
 
 
