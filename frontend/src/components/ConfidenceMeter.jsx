@@ -9,7 +9,6 @@ import { CONFIDENCE_BANDS } from '../lib/format'
 export default function ConfidenceMeter({ confidence, band, compact = false }) {
   const meta = CONFIDENCE_BANDS[band] || CONFIDENCE_BANDS.insufficient
   return (
-
     
     <div className={compact ? 'w-32' : 'w-full'}>
       <div className="mb-1 flex items-baseline justify-between gap-2">
