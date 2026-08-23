@@ -21,6 +21,7 @@ anthropic==0.42.0
 
 # --- optional: MongoDB Atlas backend (DB_BACKEND=mongo) --------------------
 pymongo==4.10.1
+boto3==1.35.92
 
 # --- dev ------------------------------------------------------------------
 pytest==8.3.4

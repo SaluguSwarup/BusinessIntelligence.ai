@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .api import routes_analysis, routes_auth, routes_data, routes_system
+from .auth.firebase_auth import _init_firebase
 from .config import get_settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -46,6 +47,15 @@ app = FastAPI(
     version="1.0.0",
     description=DESCRIPTION,
 )
+
+
+@app.on_event("startup")
+def validate_production_configuration() -> None:
+    errors = settings.production_errors()
+    if errors:
+        raise RuntimeError("Invalid production configuration: " + "; ".join(errors))
+    if settings.app_env.lower() == "production" and not _init_firebase():
+        raise RuntimeError("Firebase Admin could not initialise; refusing production startup")
 
 app.add_middleware(
     CORSMiddleware,
