@@ -28,20 +28,66 @@ The model improves the writing, not the conclusions. That is what makes the outp
 
 ---
 
-## 2. The four stages
+## 2. The stages
 
 They are separate because each answers a different question, and because merging them is
 exactly how a plausible-but-wrong explanation survives.
 
 ```
-OBSERVE        What actually changed?          deterministic statistics
+UNDERSTAND     What is being asked?            question -> KPI contract  (app/query/)
    │
+OBSERVE        What actually changed?          deterministic statistics
+   │           ── material-signal boundary ──  only real movements pass here
 INVESTIGATE    What could explain it?          competing hypotheses + evidence
    │
 CONTEST        What would disprove it?         adversarial checks
    │
 ACT            What should we do?              recommendations + monitoring
+                                               reframed per persona
 ```
+
+### Stage −1 — UNDERSTAND (`app/query/`)
+
+An investigation starts from a business question, not a KPI dropdown. Grounding is deterministic
+first: KPI names, semantic tags and the concept library's field aliases resolve most questions with
+no model involved. A model is consulted only when that is genuinely ambiguous, and the key it
+returns is validated against the resolver — **it may choose among the KPIs that exist and cannot
+introduce one.**
+
+Where the reading is uncertain the system says so rather than guessing. An unresolvable KPI, or a
+period the dataset does not hold, blocks and asks; a merely vague period proceeds on a stated
+default and discloses it. Investigating the nearest KPI would produce a confident answer to a
+question nobody asked.
+
+### The material-signal boundary (`app/engines/signals.py`)
+
+Everything a model learns about the numbers passes through `material_signals`. A model handed the
+full observation sees every KPI that wobbled by a percent and will, reliably, explain each one.
+Only movements a deterministic significance test already called real are offered as findings;
+anything else is carried as context flagged `moved: false` — which is what makes
+*"why did occupancy fall even though admissions were flat"* answerable. When nothing is material,
+no hypotheses are generated at all.
+
+### Where hypotheses come from
+
+The retail template library is gone. It could not do the job: a template written around orders,
+stockouts and discounting fired on any dataset with a dimension column, so a hospital's declining
+margin was explained as a competitor taking volume. Two sources replace it, both measured by the
+same machinery:
+
+- **contract-derived, deterministic** — a ratio cannot move unless its numerator or denominator
+  moved; an additive KPI moves with its terms; a change concentrated in one dimension member is
+  localised. True of every business, needs no model, always available.
+- **domain-aware, model-proposed** — mechanisms specific to how this kind of operation works, asked
+  for in both a domain-specific and a general-business category, neither forced.
+
+**Neither source asserts evidence.** Both emit *predictions* — this metric should have moved this
+way — and `hypotheses.evidence(..., expect=)` measures each against the data and flips a prediction
+that did not hold into evidence *against* the hypothesis that made it. A hypothesis cannot claim
+support it does not have, however plausible its wording. A prediction naming a metric the dataset
+does not measure is dropped, and a hypothesis left with none is discarded: this is why a hospital
+can no longer be told about competitor pricing, and why that is now structural rather than
+discouraged.
 
 ### Stage 0 — the KPI CONTRACT (`app/kpi/`)
 
@@ -307,6 +353,26 @@ roles:
 | Retrieval inspector | ❌ | ✅ |
 
 Doing this on the server is what makes it authorisation rather than presentation.
+
+### Personas are the presentation half, and are not authorisation
+
+Role decides what may be sent. **Persona** decides how it reads and what the reader is advised to
+do. The five (`business_analyst`, `business_manager`, `business_leader`, `domain_specialist`,
+`operational_user`) are free for any user to choose, because choosing one grants nothing — it writes
+a different field, and `redact.py` never looks at it.
+
+| | Business Analyst | Business Manager | Business Leader | Domain Specialist | Operational User |
+|---|---|---|---|---|---|
+| Recommends | analytical follow-ups | operational interventions | decisions and priorities | domain-technical actions | immediate actions |
+| Horizon | next analysis cycle | this quarter | strategic | 2–4 weeks | next shift |
+
+**The invariant, enforced in code.** `personas.reframe` builds every persona's advice from one
+`RecommendationCore` per hypothesis — cause metric, confidence, causal claim, supporting and
+contradicting evidence — computed before any persona is consulted. Evidence, ranking, confidence and
+causal verdicts are therefore identical for every reader; only framing and advice differ. A
+recommendation whose `based_on` is not in that core is dropped rather than shown, so a reframing
+cannot become an invention. Persona differentiation also works with no API key, via
+`_deterministic_reframe` — it degrades in eloquence, not in existence.
 
 ---
 

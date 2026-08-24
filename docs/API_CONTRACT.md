@@ -50,9 +50,30 @@ Tells the frontend which authentication path is active.
   "demo_login_enabled": true,
   "roles": [ { "key": "business_leader", "label": "Business Leader", "description": "…" },
              { "key": "data_analyst",    "label": "Data Analyst",    "description": "…" } ],
+  "personas": [ { "key": "business_analyst", "label": "Business Analyst",
+                  "description": "…", "action_horizon": "analysis_cycle" }, … ],
   "notice": "Running in demo auth mode: … signatures are not verified."
 }
 ```
+
+### Roles and personas are different things
+
+A **role** is authorisation: which fields the server is willing to send at all. There are two
+(`data_analyst`, `business_leader`) and they drive server-side redaction.
+
+A **persona** is presentation: how findings are framed and what the reader is advised to do. There
+are five (`business_analyst`, `business_manager`, `business_leader`, `domain_specialist`,
+`operational_user`), any user may choose any of them, and choosing one grants nothing.
+
+`PATCH /api/auth/persona` with `{ "persona": "operational_user" }` changes it; the persona also
+defaults sensibly from the role for a user who never picks one, and an unknown persona falls back to
+neutral analyst framing rather than a guess.
+
+**The invariant:** persona changes the explanation and the recommendations. It never changes the
+evidence, the hypothesis ranking, the confidence scores or the causal verdicts — those are computed
+once, before any persona is consulted, and are returned identically to every reader in
+`act.persona_view.recommendation_basis`. A recommendation that does not trace back to a cause metric
+in that basis is dropped rather than shown.
 
 ### `POST /api/auth/demo-login` — only when `mode = demo`
 ```json
@@ -168,11 +189,13 @@ Shared request body (all fields optional):
 |---|---|---|
 | `GET` | `/api/dashboard?year=&quarter=&kpi=&comparison=` | Everything the dashboard needs |
 | `GET` | `/api/meta/timeframes` | Available periods + KPI catalogue |
-| `POST` | `/api/observe` | Stage 1 only |
-| `POST` | `/api/investigate` | Stages 1–2 |
-| `POST` | `/api/contest` | Stages 1–3 |
-| `POST` | `/api/act` | Stage 4 (runs 1–3 internally) |
-| `POST` | `/api/investigations/run` | All four stages, persisted — **used by the UI** |
+| `POST` | `/api/observe` | Stage 1 only — KPI or `question` |
+| `POST` | `/api/investigate` | Stages 1–2 — KPI or `question` |
+| `POST` | `/api/contest` | Stages 1–3 — KPI or `question` |
+| `POST` | `/api/act` | Stage 4 (runs 1–3 internally) — KPI or `question`, reframed for `persona` |
+| `POST` | `/api/investigations/run` | All four stages for an explicitly named KPI, persisted |
+| `POST` | `/api/questions/interpret` | How a question is read, without running it |
+| `POST` | `/api/questions/investigate` | Ask a business question — **used by the UI** |
 | `GET` | `/api/investigations` | History |
 | `GET` | `/api/investigations/{id}` | A saved investigation |
 | `DELETE` | `/api/investigations/{id}` | Delete one |
@@ -180,6 +203,56 @@ Shared request body (all fields optional):
 Each stage endpoint recomputes the stages before it, so any one can be called standalone —
 this is what let the frontend be built against a stable contract while the engines were still
 being written.
+
+**Every single-stage endpoint accepts either an explicit `kpi`/`year`/`quarter` (the original
+contract) or a `question`** (resolved against the KPI contract exactly as `/api/questions/investigate`
+resolves one). When both are given the question wins. An unresolvable question returns
+`{"status": "needs_clarification", ...}` rather than the stage's normal shape — check `status` before
+reading `observe`/`investigate`/`contest`/`act`. All four route through the same
+`pipeline.prepare_stage_context` the full pipeline uses, so a single-stage call and
+`/api/questions/investigate` never disagree about what counts as a material signal or a driver.
+
+### Question-driven investigation
+
+An investigation starts from a question, not a KPI selection. Which KPI, which period and which
+comparison are resolved from the question against the dataset's KPI contract.
+
+```
+POST /api/questions/investigate
+{ "question": "Why did profit fall in Q4 even though revenue held?",
+  "dataset_id": null, "persona": null, "use_llm": true, "persist": true }
+```
+
+Two shapes come back. A resolved question returns the usual
+`{observe, investigate, contest, act, engine}` envelope plus `question`, `intent`, `comparisons`
+and `assumptions`, with `status: "ok"`.
+
+A question that cannot be resolved returns **HTTP 200** with:
+
+```json
+{
+  "status": "needs_clarification",
+  "intent": { "...": "the partial reading" },
+  "ambiguities": [
+    { "kind": "outcome_multiple", "blocking": true,
+      "message": "This question could be about 'Recovery rate', 'Readmission rate'. Which did you mean?",
+      "candidates": [ { "kpi_key": "recovery_rate", "label": "Recovery rate" } ] }
+  ]
+}
+```
+
+This is a normal branch, not an error. The alternative — investigating the nearest KPI — produces a
+confident answer to a question the user did not ask. `blocking` distinguishes the two policies: an
+unresolvable KPI or a period the dataset does not hold stops the run, while a merely vague period
+proceeds on a stated default and is disclosed in `assumptions`.
+
+`POST /api/questions/interpret` returns `{intent, blocked, assumptions}` and runs nothing. It backs
+the panel showing how the question was read, so a misreading can be corrected before an
+investigation runs.
+
+**A model can never introduce a KPI.** Any key it returns is validated against the dataset's
+resolver; an unrecognised one degrades to a clarification rather than to an investigation of
+something the dataset does not measure.
 
 ### Stage 1 — `observe`
 

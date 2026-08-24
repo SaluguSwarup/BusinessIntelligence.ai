@@ -80,6 +80,9 @@ export const api = {
   register: (payload) => request('/api/auth/register', { method: 'POST', body: payload }),
   me: () => request('/api/auth/me'),
   setRole: (role) => request('/api/auth/role', { method: 'PATCH', body: { role } }),
+  // Presentation only — a persona changes how findings are framed and what is
+  // recommended, never what the server is willing to send. That stays on role.
+  setPersona: (persona) => request('/api/auth/persona', { method: 'PATCH', body: { persona } }),
 
   // structured data
   listDatasets: () => request('/api/datasets'),
@@ -153,6 +156,15 @@ export const api = {
   },
   runInvestigation: (payload, signal) =>
     request('/api/investigations/run', { method: 'POST', body: payload, signal }),
+
+  // question-driven investigation
+  interpretQuestion: (question, signal) =>
+    request('/api/questions/interpret', { method: 'POST', body: { question }, signal }),
+  // Resolves to either a full result or { status: 'needs_clarification', ... } —
+  // an unresolvable question is a normal branch, not an error.
+  askQuestion: (payload, signal) =>
+    request('/api/questions/investigate', { method: 'POST', body: payload, signal }),
+
   listInvestigations: () => request('/api/investigations'),
   getInvestigation: (id) => request(`/api/investigations/${id}`),
   deleteInvestigation: (id) => request(`/api/investigations/${id}`, { method: 'DELETE' }),
