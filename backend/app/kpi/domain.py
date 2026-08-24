@@ -3,9 +3,10 @@ Business-domain detection for KPI *explanations*.
 
 This module answers one question: given the concepts that were actually bound
 to real fields in this dataset (`library.bind_library`), what is the most
-plausible kind of business this data describes? The answer drives only the
-words `explanation.py` uses to say why a KPI matters — never a formula, a
-source field or a computed number. Nothing here can change what a KPI equals.
+plausible kind of business this data describes? The answer drives the words an
+explanation reaches for — in `explanation.py` when a KPI is defined, and in the
+investigation engines when a change is explained — never a formula, a source
+field or a computed number. Nothing here can change what a KPI equals.
 
 Domain detection reuses the same evidence the library binder already produced
 rather than inventing a second classifier: a library KPI only activates when
@@ -24,7 +25,7 @@ never in doubt.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence
+from typing import Any, Dict, List, Sequence
 
 from .library import LibraryMatch
 from .profiling import DatasetProfile
@@ -107,6 +108,33 @@ class DomainContext:
     confidence: float
     is_uncertain: bool
     evidence: List[str] = field(default_factory=list)
+
+
+def domain_context_from_contract(contract: Any) -> DomainContext:
+    """
+    Rebuild the detected business context from a stored contract.
+
+    `detect_domain_context` runs once, at discovery, and its result is flattened
+    onto the contract as four scalar fields. The analysis engines run long after
+    that, with no access to the library matches the detection needed — so rather
+    than re-detect (which would mean re-profiling on every request), the context
+    is reconstructed here. `vocab` is a pure function of the domain key, so
+    nothing is lost.
+
+    A contract that never recorded a domain yields the uncertain context, which
+    is exactly what an explanation should be grounded in when the industry is
+    genuinely unknown.
+    """
+    domains = list(getattr(contract, "detected_domains", None) or [])
+    domain = domains[0] if domains else "uncertain"
+    vocab = DOMAIN_VOCAB.get(domain, UNKNOWN_VOCAB)
+    return DomainContext(
+        domain=domain,
+        vocab=vocab,
+        confidence=float(getattr(contract, "domain_confidence", 0.0) or 0.0),
+        is_uncertain=bool(getattr(contract, "domain_uncertain", True)),
+        evidence=list(getattr(contract, "domain_evidence", None) or []),
+    )
 
 
 def detect_domain_context(matches: Sequence[LibraryMatch], profile: DatasetProfile,

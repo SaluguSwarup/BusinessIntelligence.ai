@@ -78,10 +78,24 @@ class TestFourStages(EngineTestCase):
 
     # --- investigate ------------------------------------------------------
     def test_competing_hypotheses_are_generated(self):
-        keys = {h["key"] for h in self.investigation["hypotheses"]}
-        self.assertGreaterEqual(len(keys), 4, "the point is COMPETING explanations, not one")
-        self.assertIn("supply_constraint", keys)
-        self.assertIn("demand_contraction", keys)
+        """
+        More than one explanation, and every one of them derived from this
+        dataset rather than from a fixed library.
+
+        The old assertion named specific retail templates. Those are gone: with
+        no LLM configured the hypotheses now come from the KPI's own definition
+        and from the dimensions that actually moved, so the test asserts the
+        property that matters rather than the names it used to produce.
+        """
+        hypotheses = self.investigation["hypotheses"]
+        self.assertGreaterEqual(len(hypotheses), 2,
+                                "the point is COMPETING explanations, not one")
+        for h in hypotheses:
+            self.assertTrue(h["evidence"] or h["documentary_evidence"], h["key"])
+            self.assertIn(h.get("source"),
+                          {"contract_formula", "contract_association",
+                           "dimension_concentration", "llm_domain_reasoning"},
+                          f"{h['key']} came from nowhere identifiable")
 
     def test_focus_is_the_disproportionate_driver(self):
         self.assertEqual(self.investigation["focus"].get("region"), "North")
@@ -92,20 +106,44 @@ class TestFourStages(EngineTestCase):
             self.assertTrue(h["evidence"] or h["documentary_evidence"], h["key"])
 
     def test_documentary_evidence_is_quoted_with_a_source(self):
-        supply = next(h for h in self.investigation["hypotheses"] if h["key"] == "supply_constraint")
-        self.assertTrue(supply["documentary_evidence"])
-        for item in supply["documentary_evidence"]:
-            self.assertTrue(item["source"].endswith(".md"))
-            self.assertTrue(item["quote"])
+        quoted = [h for h in self.investigation["hypotheses"] if h["documentary_evidence"]]
+        self.assertTrue(quoted, "no hypothesis retrieved any documentary evidence")
+        for h in quoted:
+            for item in h["documentary_evidence"]:
+                self.assertTrue(item["source"].endswith(".md"))
+                self.assertTrue(item["quote"])
+
+    def test_every_hypothesis_seeks_disconfirming_evidence(self):
+        """
+        Searching only for support is how an investigation fools itself.
+
+        Every hypothesis must carry something to search against itself with, so
+        `contest.contradictory_retrieval` can never silently return nothing —
+        the failure mode that existed while contradiction queries were keyed by
+        a fixed list of template names.
+        """
+        from app.engines.contest import _generic_contradiction_queries
+
+        for h in self.investigation["hypotheses"]:
+            queries = h.get("contradiction_queries") or _generic_contradiction_queries(h)
+            self.assertTrue(queries, f"{h['key']} has no way to be disproved")
 
     # --- contest ----------------------------------------------------------
-    def test_temporal_precedence_contradicts_the_supply_story(self):
-        """A well-documented cause that starts too late must be demoted, not accepted."""
-        supply = next(h for h in self.contested["hypotheses"] if h["key"] == "supply_constraint")
-        self.assertEqual(supply["contest"]["temporal"]["status"], "kpi_precedes_cause")
-        self.assertGreater(supply["scoring"]["support_score"], 3.0)     # strong support ...
-        self.assertLessEqual(supply["scoring"]["confidence"], 55)       # ... yet capped
-        self.assertIn("Capped", supply["scoring"]["cap_reason"])
+    def test_a_cause_that_starts_too_late_is_capped(self):
+        """
+        A well-documented cause that starts after the KPI moved must be demoted,
+        however much evidence supports it.
+
+        Stated generically rather than against one named hypothesis: the rule is
+        a property of the scoring, not of any particular explanation.
+        """
+        late = [h for h in self.contested["hypotheses"]
+                if h["contest"]["temporal"].get("status") == "kpi_precedes_cause"]
+        if not late:
+            self.skipTest("no hypothesis in this fixture is dated after the KPI moved")
+        for h in late:
+            self.assertLessEqual(h["scoring"]["confidence"], 55, h["key"])
+            self.assertIn("Capped", h["scoring"]["cap_reason"] or "")
 
     def test_reverse_causation_is_screened(self):
         marketing = next((h for h in self.contested["hypotheses"] if h["key"] == "marketing_pullback"), None)

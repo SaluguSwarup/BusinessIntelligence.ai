@@ -105,6 +105,14 @@ def attach_contract(uid: str, dataset: Dict[str, Any], df: pd.DataFrame,
     schema.contract_resolver = resolver
     schema.contract_status = contract.status
     schema.contract_version = contract.version
+    # The business context the contract was screened under. Rebuilt rather than
+    # re-detected: detection needs library matches that only exist at discovery
+    # time, and the contract already records everything the context needs.
+    try:
+        from ..kpi.domain import domain_context_from_contract
+        schema.domain = domain_context_from_contract(contract)
+    except Exception as exc:                       # pragma: no cover - defensive
+        log.warning("Could not rebuild domain context for %s: %s", dataset.get("_id"), exc)
     # The contract decides which KPIs exist. Only those whose source columns are
     # actually present in the frame can be offered.
     columns = set(df.columns)

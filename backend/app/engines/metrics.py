@@ -149,9 +149,35 @@ class DatasetSchema:
     contract_resolver: Optional[Resolver] = field(default=None, repr=False, compare=False)
     contract_status: str = ""
     contract_version: int = 0
+    # The detected business context, rebuilt from the contract by
+    # `dataset_service.attach_contract`. This is what lets an explanation speak
+    # about beds and admissions rather than about "units". Like the resolver it
+    # is not serialisable and is excluded from `to_dict`.
+    domain: Optional[Any] = field(default=None, repr=False, compare=False)
+
+    # -- contract semantics -------------------------------------------------
+    def kpi_definition(self, key: str) -> Optional[Any]:
+        """
+        The full `KpiDefinition` behind a KPI key, when this dataset has a
+        contract.
+
+        The compiled resolver already carries the definition; the engines only
+        ever received the label and unit, which is why a KPI's business meaning
+        never reached an explanation. Returns None for a dataset with no
+        contract, so every caller must treat the semantics as optional.
+        """
+        spec = (self.contract_resolver or {}).get(key)
+        return getattr(spec, "definition", None) if spec else None
+
+    @property
+    def domain_key(self) -> str:
+        """The detected domain key, or 'uncertain' when nothing was detected."""
+        return getattr(self.domain, "domain", None) or "uncertain"
 
     def to_dict(self) -> Dict[str, Any]:
-        d = {k: v for k, v in self.__dict__.items() if k != "contract_resolver"}
+        d = {k: v for k, v in self.__dict__.items()
+             if k not in ("contract_resolver", "domain")}
+        d["domain"] = self.domain_key
         d["kpi_catalogue"] = [
             {
                 "key": k,

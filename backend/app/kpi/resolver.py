@@ -344,6 +344,40 @@ def compile_kpi(definition: KpiDefinition) -> CompiledKpi:
     )
 
 
+def _derive_structural_depends_on(compiled: Dict[str, CompiledKpi]) -> None:
+    """
+    Fill in each KPI's structural dependencies, from its own formula.
+
+    `KpiDefinition.depends_on` is hand-authored and, in practice, always empty —
+    nothing in discovery populates it, so nothing downstream has ever been able
+    to read a real KPI relationship off the contract. But the formula already
+    says which other KPIs a ratio or additive KPI is built from: if another
+    KPI's fields are entirely contained in this one's numerator, denominator or
+    expression, that KPI is structurally a dependency whether or not anyone
+    declared it by hand. Declared dependencies are kept; structural ones are
+    added on top, never removed.
+    """
+    field_sets: Dict[str, Set[str]] = {}
+    for key, compiled_kpi in compiled.items():
+        fields: Set[str] = set(compiled_kpi.source_fields)
+        for node in (compiled_kpi.expression_ast, compiled_kpi.numerator_ast,
+                    compiled_kpi.denominator_ast):
+            if node is not None:
+                fields |= referenced_fields(node)
+        field_sets[key] = fields
+
+    for key, compiled_kpi in compiled.items():
+        own_fields = field_sets[key]
+        if not own_fields:
+            continue
+        structural = {
+            other for other, other_fields in field_sets.items()
+            if other != key and other_fields and other_fields <= own_fields
+        }
+        if structural:
+            compiled_kpi.depends_on = sorted(set(compiled_kpi.depends_on) | structural)
+
+
 def compile_contract(contract: KpiContract,
                      include_unapproved: bool = False) -> Dict[str, CompiledKpi]:
     """
@@ -364,6 +398,7 @@ def compile_contract(contract: KpiContract,
             # A single malformed entry must never make the whole contract
             # unusable; it simply does not resolve and the KPI is unavailable.
             continue
+    _derive_structural_depends_on(out)
     return out
 
 

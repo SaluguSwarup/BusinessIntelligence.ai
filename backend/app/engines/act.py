@@ -152,6 +152,35 @@ def monitoring_threshold(df: pd.DataFrame, metric: str,
     }
 
 
+def generic_play(hypothesis: Dict[str, Any],
+                 resolver: Optional[Resolver] = None) -> Dict[str, Any]:
+    """
+    A playbook entry for a mechanism the fixed library does not cover.
+
+    Deliberately modest. It does not invent a domain intervention it has no
+    basis for; it says to confirm the mechanism, watch the driver the evidence
+    actually implicated, and decide once it is established. That is the honest
+    action when the system knows a driver moved but has no pre-written play for
+    the kind of business it belongs to.
+    """
+    cause = hypothesis.get("cause_metric")
+    label = metric_label(cause, resolver) if cause else "the implicated driver"
+    return {
+        "title": f"Confirm and act on {label.lower()}",
+        "actions": [
+            f"Establish with the team that owns {{focus}} whether the movement in {label.lower()} "
+            "came about the way this explanation describes.",
+            f"Track {label.lower()} against the threshold below and treat a further move as "
+            "confirmation.",
+            "Decide on an intervention once the mechanism is confirmed, rather than acting on "
+            "the association alone.",
+        ],
+        "owner": "The owner of the affected area",
+        "horizon": "next 2-4 weeks",
+        "monitor": [cause] if cause else [],
+    }
+
+
 def _fmt_change(observation: Dict[str, Any]) -> str:
     pct = observation.get("change_pct")
     return f"{pct:+.1f}%" if pct is not None else "n/a"
@@ -165,9 +194,11 @@ def build_recommendations(df: pd.DataFrame, observation: Dict[str, Any],
         scoring = h["scoring"]
         if scoring["confidence"] < 20:
             continue
-        play = PLAYBOOK.get(h.get("family"), None)
-        if not play:
-            continue
+        # A hypothesis whose family has no playbook entry used to produce no
+        # recommendation at all, silently. Now that mechanisms are proposed for
+        # the business at hand rather than drawn from a fixed retail library,
+        # an unrecognised family is normal and must still yield advice.
+        play = PLAYBOOK.get(h.get("family")) or generic_play(h, resolver)
         target = focus_label or "the affected part of the business"
         priority = ("high" if scoring["confidence"] >= 60 else
                     "medium" if scoring["confidence"] >= 40 else "low")
@@ -203,7 +234,10 @@ def build_recommendations(df: pd.DataFrame, observation: Dict[str, Any],
             "priority": priority,
             "horizon": play["horizon"],
             "owner": play["owner"],
-            "actions": [a.format(focus=target) for a in play["actions"]],
+            # Plain replacement rather than str.format: an action string authored
+            # by a model may legitimately contain braces, and `.format` would
+            # raise on them.
+            "actions": [a.replace("{focus}", target) for a in play["actions"]],
             "rationale": (
                 f"{h['statement']} Evidence strength for this explanation is {scoring['confidence']}% "
                 f"({scoring['confidence_band']}). {scoring['causal_claim']}"
@@ -219,7 +253,8 @@ def build_recommendations(df: pd.DataFrame, observation: Dict[str, Any],
 
 def act(df: pd.DataFrame, observation: Dict[str, Any], investigation: Dict[str, Any],
         contested: Dict[str, Any], llm=None,
-        resolver: Optional[Resolver] = None) -> Dict[str, Any]:
+        resolver: Optional[Resolver] = None,
+        persona: Optional[str] = None) -> Dict[str, Any]:
     focus_label = investigation.get("focus_label", "")
     ranking = contested.get("ranking", [])
     top = contested["hypotheses"][0] if contested.get("hypotheses") else None
@@ -299,11 +334,21 @@ def act(df: pd.DataFrame, observation: Dict[str, Any], investigation: Dict[str, 
         except Exception as exc:
             llm_story = {"error": f"LLM narrative unavailable ({exc}). The deterministic summary is shown instead."}
 
+    # The reader's own view. Explanation and recommended actions are both cast
+    # for this persona, from the same evidence and the same ranking every other
+    # persona sees — `personas.reframe` enforces that boundary.
+    persona_view = None
+    if persona:
+        from ..personas.reframe import reframe_for
+        persona_view = reframe_for(persona, observation, investigation, contested,
+                                   recommendations, llm=llm)
+
     return {
         "narrative": narrative,
         "recommendations": recommendations,
         "ranking": ranking,
         "llm_story": llm_story,
+        "persona_view": persona_view,
         "generated_from": {
             "kpi": observation["kpi"],
             "timeframe": observation["timeframe"]["label"],

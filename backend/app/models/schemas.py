@@ -6,6 +6,11 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 Role = Literal["data_analyst", "business_leader"]
+# Presentation, not authorisation. A persona reframes the explanation and the
+# recommendations; it can never widen what the server is willing to send, which
+# stays governed by `Role` alone. See `app.personas`.
+Persona = Literal["business_analyst", "business_manager", "business_leader",
+                  "domain_specialist", "operational_user"]
 Comparison = Literal["previous_period", "year_over_year"]
 
 
@@ -19,6 +24,10 @@ class RoleUpdate(BaseModel):
     role: Role
 
 
+class PersonaUpdate(BaseModel):
+    persona: Persona
+
+
 class DemoLoginRequest(BaseModel):
     email: str
     display_name: str = ""
@@ -30,10 +39,30 @@ class UserOut(BaseModel):
     email: str
     display_name: str
     role: Role
+    persona: Persona = "business_analyst"
     organisation: str = ""
     created_at: Optional[str] = None
     token_verified: bool = False
     permissions: Dict[str, bool] = Field(default_factory=dict)
+
+
+class QuestionRequest(BaseModel):
+    """
+    A business question, in the user's own words.
+
+    Replaces KPI selection as the way an investigation starts. Which KPI, which
+    period and which comparison are resolved from the question against the
+    dataset's KPI contract rather than chosen from a dropdown.
+    """
+
+    question: str = Field(min_length=1, max_length=500,
+                          description="e.g. 'Why did profit fall in Q4 even though revenue held?'")
+    dataset_id: Optional[str] = None
+    persona: Optional[Persona] = Field(
+        default=None,
+        description="Overrides the user's stored persona for this run. Presentation only.")
+    use_llm: bool = True
+    persist: bool = True
 
 
 class AnalysisRequest(BaseModel):
@@ -42,6 +71,14 @@ class AnalysisRequest(BaseModel):
     quarter: Optional[int] = Field(default=None, ge=1, le=4,
                                    description="1-4, or null for the full year.")
     comparison: Comparison = "previous_period"
+    # A per-stage caller may target the KPI directly (above) OR ask a business
+    # question and let the stage resolve its own KPI/period from the contract,
+    # the same way `/api/questions/investigate` does. When both are supplied,
+    # the question wins — it is the more specific instruction.
+    question: Optional[str] = Field(
+        default=None, max_length=500,
+        description="Resolve the KPI/period from a question instead of the fields above.")
+    persona: Optional[Persona] = None
     dataset_id: Optional[str] = None
     use_llm: bool = True
     persist: bool = True

@@ -15,7 +15,9 @@ import re
 from typing import Any, Dict, List, Optional
 
 from ..config import get_settings
-from .prompts import ACT_SYSTEM, CONTEST_SYSTEM, INVESTIGATE_SYSTEM, KPI_DISCOVERY_SYSTEM
+from .prompts import (ACT_SYSTEM, CONTEST_SYSTEM, HYPOTHESIS_SYSTEM,
+                      INVESTIGATE_SYSTEM, KPI_DISCOVERY_SYSTEM, QUERY_SYSTEM,
+                      persona_system)
 
 log = logging.getLogger(__name__)
 JSON_BLOCK = re.compile(r"\{.*\}", re.S)
@@ -145,6 +147,64 @@ class LLMClient:
         return out
 
     # -- roles -------------------------------------------------------------
+    def understand_question(self, question: str, kpi_catalogue: List[Dict[str, Any]],
+                            dimensions: List[str]) -> Dict[str, Any]:
+        """
+        Read a business question against the KPIs this dataset actually has.
+
+        Called only when deterministic grounding could not settle it. The chosen
+        key is validated by the caller against the resolver, so a KPI the model
+        invents becomes "could not resolve" rather than a wrong investigation.
+        """
+        payload = {
+            "question": question,
+            "available_kpis": kpi_catalogue,
+            "available_dimensions": dimensions,
+        }
+        return self._call(QUERY_SYSTEM, json.dumps(payload, indent=2, default=str))
+
+    def generate_hypotheses(self, signals: Dict[str, Any], kpi_semantics: Dict[str, Any],
+                            domain: Dict[str, Any], driver_graph: Dict[str, Any],
+                            allowed_metrics: List[str]) -> Dict[str, Any]:
+        """
+        Propose mechanisms that could explain what the data shows.
+
+        `signals` has already been filtered to material movements, so the model
+        cannot be misled into explaining noise. It returns predictions rather
+        than evidence; the engine measures them and decides what they support.
+        """
+        payload = {
+            "business_context": domain,
+            "kpi_under_investigation": kpi_semantics,
+            "what_changed": signals,
+            "related_measures": driver_graph,
+            "allowed_metrics": allowed_metrics,
+        }
+        return self._call(HYPOTHESIS_SYSTEM, json.dumps(payload, indent=2, default=str))
+
+    def write_for_persona(self, profile: Any, observation: Dict[str, Any],
+                          investigation: Dict[str, Any], contested: Dict[str, Any],
+                          cores: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Explain the investigation, and say what THIS reader should do about it.
+
+        The findings arrive fixed. `cores` carries the persona-invariant
+        substrate every recommendation must trace back to, so the reframing can
+        change the advice without being able to change what the evidence says.
+        """
+        payload = {
+            "observation": self._observation_facts(observation),
+            "focus": investigation.get("focus", {}),
+            "hypotheses": [self._hypothesis_facts(h, include_contest=True)
+                           for h in (contested.get("ranking") or [])[:4]],
+            "recommendation_basis": cores,
+            "reader": {"persona": profile.key, "label": profile.label,
+                       "action_horizon": profile.action_horizon},
+        }
+        system = persona_system(profile.explanation_brief, profile.recommendation_brief,
+                                profile.vocabulary, profile.action_horizon)
+        return self._call(system, json.dumps(payload, indent=2, default=str))
+
     def frame_hypotheses(self, observation: Dict[str, Any], hypotheses: List[Dict[str, Any]],
                          focus: Dict[str, str]) -> Dict[str, Any]:
         payload = {

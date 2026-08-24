@@ -156,13 +156,39 @@ def consistency_check(cur: pd.DataFrame, base: pd.DataFrame, schema: DatasetSche
     }
 
 
+def _generic_contradiction_queries(hypothesis: Dict[str, Any]) -> List[str]:
+    """
+    A last-resort disconfirmation search built from the hypothesis itself.
+
+    Used when a hypothesis carries no `contradiction_queries` of its own and is
+    not one of the built-in keys. Crude, but a crude search for counter-evidence
+    beats the alternative of never looking.
+    """
+    cause = (hypothesis.get("cause_metric") or "").replace("_", " ").strip()
+    title = (hypothesis.get("title") or "").strip()
+    out: List[str] = []
+    if cause:
+        out.append(f"{cause} stable unchanged no change flat")
+        out.append(f"{cause} not the cause unrelated ruled out")
+    if title:
+        out.append(f"{title} disputed disagreed alternative explanation")
+    return out or ["alternative explanation disputed unrelated no evidence"]
+
+
 def contradictory_retrieval(hypothesis: Dict[str, Any], retriever: Retriever,
                             terms: List[str], llm=None) -> List[Dict[str, Any]]:
     """Retrieve passages that argue AGAINST the hypothesis."""
     if not retriever.available:
         return []
     supporting_ids = [e.get("chunk_id") for e in hypothesis.get("documentary_evidence", [])]
-    queries = CONTRADICTION_QUERIES.get(hypothesis["key"], [])
+    # The hypothesis states what would show it to be wrong; that is the primary
+    # source. The keyed table is a fallback for the handful of built-in keys, and
+    # a generic query is the last resort — an empty query list would mean no
+    # disconfirming evidence was ever sought, silently, which is exactly the
+    # confirmation bias this stage exists to counter.
+    queries = (hypothesis.get("contradiction_queries")
+               or CONTRADICTION_QUERIES.get(hypothesis.get("key", ""), [])
+               or _generic_contradiction_queries(hypothesis))
     found: List[Dict[str, Any]] = []
     seen = set()
     for q in queries:

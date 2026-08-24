@@ -43,6 +43,11 @@ def reset_store() -> None:              # used by the test-suite
 # ---------------------------------------------------------------------------
 class UserRepository:
     ROLES = ("data_analyst", "business_leader")
+    # Presentation only. A role says what a user may see; a persona says how it
+    # is framed and what they are advised to do. The two are deliberately
+    # independent — see `app.personas`.
+    PERSONAS = ("business_analyst", "business_manager", "business_leader",
+                "domain_specialist", "operational_user")
 
     def __init__(self):
         self.col = get_store().collection("users")
@@ -87,6 +92,18 @@ class UserRepository:
         if role not in self.ROLES:
             raise ValueError(f"unknown role: {role}")
         return self.col.update_one({"uid": uid}, {"role": role, "updated_at": now_iso()})
+
+    def set_persona(self, uid: str, persona: str) -> Optional[Dict[str, Any]]:
+        """
+        Change how investigations are framed for this user.
+
+        Deliberately does not touch `role`: a persona carries no authority, so
+        changing it can never widen what the server is willing to send.
+        """
+        if persona not in self.PERSONAS:
+            raise ValueError(f"unknown persona: {persona}")
+        return self.col.update_one({"uid": uid},
+                                   {"persona": persona, "updated_at": now_iso()})
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,9 @@ from ..engines.investigate import investigate as investigate_stage
 from ..engines.act import act as act_stage
 from ..engines.observe import available_timeframes
 from ..llm.client import get_llm
-from ..models.schemas import AnalysisRequest
+from ..models.schemas import AnalysisRequest, QuestionRequest
+from ..personas import persona_for_role
+from ..query import interpret_question_cached
 from ..services import dataset_service, pipeline
 from .redact import (
     is_analyst,
@@ -75,71 +77,131 @@ def timeframes(user: Dict[str, Any] = Depends(current_user),
 
 
 # ---------------------------------------------------------------------------
-# stage 1 — observe
+# single-stage endpoints — intent-driven
 # ---------------------------------------------------------------------------
+def _resolve_stage_target(user: Dict[str, Any], ds: Dict[str, Any], body: AnalysisRequest):
+    """
+    What KPI/period a stage should run against, and how it was decided.
+
+    A caller may name the KPI directly (`kpi`/`year`/`quarter`, the original
+    contract these endpoints shipped with) or ask a question and let it resolve
+    against the KPI contract, the same way `/api/questions/investigate` does.
+    The question wins when both are given, since it is the more specific ask.
+
+    Returns `(kpi, year, quarter, comparison, intent, clarification)`.
+    `clarification` is the payload to return as-is when a question could not
+    be resolved — the caller checks this before doing anything else. Unlike
+    the KPI-driven path, an unresolvable question must not fall through to
+    "not an approved KPI"; that error names a KPI, and there isn't one yet.
+    """
+    if not body.question:
+        return body.kpi, body.year, body.quarter, body.comparison, None, None
+
+    df, schema = dataset_service.load(ds, user["uid"])
+    llm = get_llm() if body.use_llm else None
+    intent = interpret_question_cached(body.question, schema, df, ds["_id"], llm=llm)
+    if intent.blocked or not intent.outcome:
+        clarification = {
+            "status": "needs_clarification",
+            "question": body.question,
+            "intent": intent.model_dump(),
+            "ambiguities": [a.model_dump() for a in intent.ambiguities if a.blocking],
+        }
+        return None, None, None, None, intent, clarification
+
+    period = intent.period
+    return (intent.outcome.kpi_key,
+            period.year if period else body.year,
+            period.quarter if period else body.quarter,
+            period.comparison if period else body.comparison,
+            intent, None)
+
+
 @router.post("/observe")
 def observe_endpoint(body: AnalysisRequest,
                      user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """STAGE 1 alone — for a named KPI, or for a question resolved against the contract."""
     ds = _dataset_for(user, body.dataset_id)
-    observation = _guard(pipeline.run_observe, ds, body.kpi, body.year, body.quarter,
-                         body.comparison, user["uid"])
-    return {"stage": "observe", "observe": redact_observation(observation, is_analyst(user))}
+    kpi, year, quarter, comparison, intent, clarification = _resolve_stage_target(user, ds, body)
+    if clarification:
+        return clarification
+    observation = _guard(pipeline.run_observe, ds, kpi, year, quarter, comparison, user["uid"])
+    result = {"stage": "observe", "observe": redact_observation(observation, is_analyst(user))}
+    if intent:
+        result["intent"] = intent.model_dump()
+    return result
 
 
-# ---------------------------------------------------------------------------
-# stage 2 — investigate
-# ---------------------------------------------------------------------------
 @router.post("/investigate")
 def investigate_endpoint(body: AnalysisRequest,
                          user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """STAGES 1-2 — the material-signal filter and driver graph run exactly as in the full pipeline."""
     ds = _dataset_for(user, body.dataset_id)
+    kpi, year, quarter, comparison, intent, clarification = _resolve_stage_target(user, ds, body)
+    if clarification:
+        return clarification
     df, schema = dataset_service.load(ds, user["uid"])
-    observation = _guard(pipeline.run_observe, ds, body.kpi, body.year, body.quarter,
-                         body.comparison, user["uid"])
+    observation = _guard(pipeline.run_observe, ds, kpi, year, quarter, comparison, user["uid"])
+    ctx = pipeline.prepare_stage_context(df, schema, observation, intent, comparison)
     llm = get_llm() if body.use_llm else None
-    investigation = investigate_stage(df, schema, observation, user["uid"], llm=llm)
+    investigation = investigate_stage(df, schema, observation, user["uid"], llm=llm,
+                                      signals=ctx["signals"], graph=ctx["graph"])
     analyst = is_analyst(user)
-    return {"stage": "investigate",
-            "observe": redact_observation(observation, analyst),
-            "investigate": redact_investigation(investigation, analyst)}
+    result = {"stage": "investigate",
+             "observe": redact_observation(observation, analyst),
+             "investigate": redact_investigation(investigation, analyst)}
+    if intent:
+        result["intent"] = intent.model_dump()
+    return result
 
 
-# ---------------------------------------------------------------------------
-# stage 3 — contest
-# ---------------------------------------------------------------------------
 @router.post("/contest")
 def contest_endpoint(body: AnalysisRequest,
                      user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """STAGES 1-3."""
     ds = _dataset_for(user, body.dataset_id)
+    kpi, year, quarter, comparison, intent, clarification = _resolve_stage_target(user, ds, body)
+    if clarification:
+        return clarification
     df, schema = dataset_service.load(ds, user["uid"])
-    observation = _guard(pipeline.run_observe, ds, body.kpi, body.year, body.quarter,
-                         body.comparison, user["uid"])
+    observation = _guard(pipeline.run_observe, ds, kpi, year, quarter, comparison, user["uid"])
+    ctx = pipeline.prepare_stage_context(df, schema, observation, intent, comparison)
     llm = get_llm() if body.use_llm else None
-    investigation = investigate_stage(df, schema, observation, user["uid"], llm=llm)
+    investigation = investigate_stage(df, schema, observation, user["uid"], llm=llm,
+                                      signals=ctx["signals"], graph=ctx["graph"])
     contested = contest_stage(df, schema, observation, investigation, user["uid"], llm=llm)
     analyst = is_analyst(user)
-    return {"stage": "contest",
-            "observe": redact_observation(observation, analyst),
-            "investigate": redact_investigation(investigation, analyst),
-            "contest": redact_contest(contested, analyst)}
+    result = {"stage": "contest",
+             "observe": redact_observation(observation, analyst),
+             "investigate": redact_investigation(investigation, analyst),
+             "contest": redact_contest(contested, analyst)}
+    if intent:
+        result["intent"] = intent.model_dump()
+    return result
 
 
-# ---------------------------------------------------------------------------
-# stage 4 — act
-# ---------------------------------------------------------------------------
 @router.post("/act")
 def act_endpoint(body: AnalysisRequest,
                  user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """STAGE 4 (runs 1-3 internally), reframed for the caller's persona."""
     ds = _dataset_for(user, body.dataset_id)
+    kpi, year, quarter, comparison, intent, clarification = _resolve_stage_target(user, ds, body)
+    if clarification:
+        return clarification
     df, schema = dataset_service.load(ds, user["uid"])
-    observation = _guard(pipeline.run_observe, ds, body.kpi, body.year, body.quarter,
-                         body.comparison, user["uid"])
+    observation = _guard(pipeline.run_observe, ds, kpi, year, quarter, comparison, user["uid"])
+    ctx = pipeline.prepare_stage_context(df, schema, observation, intent, comparison)
     llm = get_llm() if body.use_llm else None
-    investigation = investigate_stage(df, schema, observation, user["uid"], llm=llm)
+    investigation = investigate_stage(df, schema, observation, user["uid"], llm=llm,
+                                      signals=ctx["signals"], graph=ctx["graph"])
     contested = contest_stage(df, schema, observation, investigation, user["uid"], llm=llm)
+    persona = body.persona or user.get("persona") or persona_for_role(user.get("role"))
     action = act_stage(df, observation, investigation, contested, llm=llm,
-                       resolver=schema.contract_resolver)
-    return {"stage": "act", "act": action}
+                       resolver=schema.contract_resolver, persona=persona)
+    result = {"stage": "act", "act": action}
+    if intent:
+        result["intent"] = intent.model_dump()
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -148,10 +210,57 @@ def act_endpoint(body: AnalysisRequest,
 @router.post("/investigations/run")
 def run_investigation(body: AnalysisRequest,
                       user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    """OBSERVE -> INVESTIGATE -> CONTEST -> ACT in one call. Used by the UI."""
+    """
+    OBSERVE -> INVESTIGATE -> CONTEST -> ACT for an explicitly chosen KPI.
+
+    Superseded as the primary entry point by `/questions/investigate`, which
+    resolves the KPI from a question instead. Kept because the dashboard still
+    drills in from a named KPI, and because saved investigations link here.
+    """
     ds = _dataset_for(user, body.dataset_id)
+    persona = user.get("persona") or persona_for_role(user.get("role"))
     result = _guard(pipeline.run_full, user["uid"], ds, body.kpi, body.year, body.quarter,
-                    body.comparison, body.persist, body.use_llm)
+                    body.comparison, body.persist, body.use_llm, persona)
+    return redact_result(result, user)
+
+
+# ---------------------------------------------------------------------------
+# question-driven investigation
+# ---------------------------------------------------------------------------
+@router.post("/questions/interpret")
+def interpret(body: QuestionRequest,
+              user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """
+    How the system reads a question, without running anything.
+
+    Cheap on purpose: it powers the panel that shows which KPI and period were
+    understood, so a misreading can be corrected before an investigation runs.
+    """
+    ds = _dataset_for(user, body.dataset_id)
+    df, schema = _guard(dataset_service.load, ds, user["uid"])
+    intent = interpret_question_cached(body.question, schema, df, ds["_id"],
+                                       llm=get_llm() if body.use_llm else None)
+    return {"intent": intent.model_dump(), "blocked": intent.blocked,
+            "assumptions": intent.assumptions}
+
+
+@router.post("/questions/investigate")
+def investigate_question(body: QuestionRequest,
+                         user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """
+    Ask a business question and get the full investigation.
+
+    Returns `status: "needs_clarification"` instead of a result when the
+    question cannot be resolved to a KPI this dataset measures, or names a
+    period it does not hold. Answering the nearest question instead would be a
+    confident answer to something the user did not ask.
+    """
+    ds = _dataset_for(user, body.dataset_id)
+    persona = body.persona or user.get("persona") or persona_for_role(user.get("role"))
+    result = _guard(pipeline.run_question, user["uid"], ds, body.question,
+                    persona=persona, persist=body.persist, use_llm=body.use_llm)
+    if result.get("status") == "needs_clarification":
+        return result
     return redact_result(result, user)
 
 
@@ -162,12 +271,17 @@ def list_investigations(user: Dict[str, Any] = Depends(current_user)) -> Dict[st
         "investigations": [
             {
                 "id": i["_id"],
+                # Older rows predate the question-driven flow and have no
+                # question; the KPI they were run on is the right label for them.
+                "question": i.get("question") or "",
+                "title": i.get("question") or i.get("kpi_label") or i.get("kpi"),
                 "kpi": i.get("kpi"), "kpi_label": i.get("kpi_label"),
                 "timeframe": i.get("timeframe"), "baseline_timeframe": i.get("baseline_timeframe"),
                 "change_pct": i.get("change_pct"), "verdict": i.get("verdict"),
                 "headline": i.get("headline"),
                 "leading_hypothesis": i.get("leading_hypothesis"),
                 "leading_confidence": i.get("leading_confidence"),
+                "persona": i.get("persona"),
                 "created_at": i.get("created_at"),
             }
             for i in items
