@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from ..db.repositories import DatasetRepository, InvestigationRepository
+from ..db.repositories import DatasetRepository, InvestigationRepository, TelemetryRepository
 from ..deps import active_dataset, current_user
 from ..engines.contest import contest as contest_stage
 from ..engines.investigate import investigate as investigate_stage
@@ -16,6 +16,7 @@ from ..models.schemas import AnalysisRequest, QuestionRequest
 from ..personas import persona_for_role
 from ..query import interpret_question_cached
 from ..services import dataset_service, pipeline
+from ..services.telemetry import request_telemetry, track_processing_step
 from .redact import (
     is_analyst,
     redact_contest,
@@ -56,9 +57,11 @@ def dashboard(year: Optional[int] = Query(default=None),
               user: Dict[str, Any] = Depends(current_user),
               dataset: Dict[str, Any] = Depends(active_dataset)) -> Dict[str, Any]:
     """Everything the dashboard needs for one (year, quarter) selection."""
-    df, schema = dataset_service.load(dataset, user["uid"])
-    observation = _guard(pipeline.run_observe, dataset, kpi, year, quarter, comparison,
-                         user["uid"])
+    with request_telemetry(user["uid"], "/api/dashboard") as telemetry:
+        with track_processing_step("Load dataset", "Non-LLM Processing"):
+            df, schema = dataset_service.load(dataset, user["uid"])
+        observation = _guard(pipeline.run_observe, dataset, kpi, year, quarter, comparison,
+                             user["uid"])
     return {
         "dataset": {"id": dataset["_id"], "filename": dataset.get("filename"),
                     "rows": schema.row_count, "grain": schema.grain},
@@ -66,6 +69,7 @@ def dashboard(year: Optional[int] = Query(default=None),
         "schema": schema.to_dict(),
         "observe": redact_observation(observation, is_analyst(user)),
         "view": {"role": user.get("role"), "analyst_detail_included": is_analyst(user)},
+        "telemetry": telemetry.saved,
     }
 
 
@@ -122,11 +126,13 @@ def observe_endpoint(body: AnalysisRequest,
                      user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     """STAGE 1 alone — for a named KPI, or for a question resolved against the contract."""
     ds = _dataset_for(user, body.dataset_id)
-    kpi, year, quarter, comparison, intent, clarification = _resolve_stage_target(user, ds, body)
-    if clarification:
-        return clarification
-    observation = _guard(pipeline.run_observe, ds, kpi, year, quarter, comparison, user["uid"])
-    result = {"stage": "observe", "observe": redact_observation(observation, is_analyst(user))}
+    with request_telemetry(user["uid"], "/api/observe") as telemetry:
+        kpi, year, quarter, comparison, intent, clarification = _resolve_stage_target(user, ds, body)
+        if clarification:
+            return clarification
+        observation = _guard(pipeline.run_observe, ds, kpi, year, quarter, comparison, user["uid"])
+    result = {"stage": "observe", "observe": redact_observation(observation, is_analyst(user)),
+              "telemetry": telemetry.saved}
     if intent:
         result["intent"] = intent.model_dump()
     return result
@@ -137,19 +143,23 @@ def investigate_endpoint(body: AnalysisRequest,
                          user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     """STAGES 1-2 — the material-signal filter and driver graph run exactly as in the full pipeline."""
     ds = _dataset_for(user, body.dataset_id)
-    kpi, year, quarter, comparison, intent, clarification = _resolve_stage_target(user, ds, body)
-    if clarification:
-        return clarification
-    df, schema = dataset_service.load(ds, user["uid"])
-    observation = _guard(pipeline.run_observe, ds, kpi, year, quarter, comparison, user["uid"])
-    ctx = pipeline.prepare_stage_context(df, schema, observation, intent, comparison)
-    llm = get_llm() if body.use_llm else None
-    investigation = investigate_stage(df, schema, observation, user["uid"], llm=llm,
-                                      signals=ctx["signals"], graph=ctx["graph"])
+    with request_telemetry(user["uid"], "/api/investigate") as telemetry:
+        kpi, year, quarter, comparison, intent, clarification = _resolve_stage_target(user, ds, body)
+        if clarification:
+            return clarification
+        with track_processing_step("Load dataset", "Non-LLM Processing"):
+            df, schema = dataset_service.load(ds, user["uid"])
+        observation = _guard(pipeline.run_observe, ds, kpi, year, quarter, comparison, user["uid"])
+        ctx = pipeline.prepare_stage_context(df, schema, observation, intent, comparison)
+        llm = get_llm() if body.use_llm else None
+        with track_processing_step("Investigate", "Non-LLM Processing"):
+            investigation = investigate_stage(df, schema, observation, user["uid"], llm=llm,
+                                              signals=ctx["signals"], graph=ctx["graph"])
     analyst = is_analyst(user)
     result = {"stage": "investigate",
-             "observe": redact_observation(observation, analyst),
-             "investigate": redact_investigation(investigation, analyst)}
+              "observe": redact_observation(observation, analyst),
+              "investigate": redact_investigation(investigation, analyst),
+              "telemetry": telemetry.saved}
     if intent:
         result["intent"] = intent.model_dump()
     return result
@@ -160,21 +170,26 @@ def contest_endpoint(body: AnalysisRequest,
                      user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     """STAGES 1-3."""
     ds = _dataset_for(user, body.dataset_id)
-    kpi, year, quarter, comparison, intent, clarification = _resolve_stage_target(user, ds, body)
-    if clarification:
-        return clarification
-    df, schema = dataset_service.load(ds, user["uid"])
-    observation = _guard(pipeline.run_observe, ds, kpi, year, quarter, comparison, user["uid"])
-    ctx = pipeline.prepare_stage_context(df, schema, observation, intent, comparison)
-    llm = get_llm() if body.use_llm else None
-    investigation = investigate_stage(df, schema, observation, user["uid"], llm=llm,
-                                      signals=ctx["signals"], graph=ctx["graph"])
-    contested = contest_stage(df, schema, observation, investigation, user["uid"], llm=llm)
+    with request_telemetry(user["uid"], "/api/contest") as telemetry:
+        kpi, year, quarter, comparison, intent, clarification = _resolve_stage_target(user, ds, body)
+        if clarification:
+            return clarification
+        with track_processing_step("Load dataset", "Non-LLM Processing"):
+            df, schema = dataset_service.load(ds, user["uid"])
+        observation = _guard(pipeline.run_observe, ds, kpi, year, quarter, comparison, user["uid"])
+        ctx = pipeline.prepare_stage_context(df, schema, observation, intent, comparison)
+        llm = get_llm() if body.use_llm else None
+        with track_processing_step("Investigate", "Non-LLM Processing"):
+            investigation = investigate_stage(df, schema, observation, user["uid"], llm=llm,
+                                              signals=ctx["signals"], graph=ctx["graph"])
+        with track_processing_step("Contest", "Non-LLM Processing"):
+            contested = contest_stage(df, schema, observation, investigation, user["uid"], llm=llm)
     analyst = is_analyst(user)
     result = {"stage": "contest",
-             "observe": redact_observation(observation, analyst),
-             "investigate": redact_investigation(investigation, analyst),
-             "contest": redact_contest(contested, analyst)}
+              "observe": redact_observation(observation, analyst),
+              "investigate": redact_investigation(investigation, analyst),
+              "contest": redact_contest(contested, analyst),
+              "telemetry": telemetry.saved}
     if intent:
         result["intent"] = intent.model_dump()
     return result
@@ -185,20 +200,25 @@ def act_endpoint(body: AnalysisRequest,
                  user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     """STAGE 4 (runs 1-3 internally), reframed for the caller's persona."""
     ds = _dataset_for(user, body.dataset_id)
-    kpi, year, quarter, comparison, intent, clarification = _resolve_stage_target(user, ds, body)
-    if clarification:
-        return clarification
-    df, schema = dataset_service.load(ds, user["uid"])
-    observation = _guard(pipeline.run_observe, ds, kpi, year, quarter, comparison, user["uid"])
-    ctx = pipeline.prepare_stage_context(df, schema, observation, intent, comparison)
-    llm = get_llm() if body.use_llm else None
-    investigation = investigate_stage(df, schema, observation, user["uid"], llm=llm,
-                                      signals=ctx["signals"], graph=ctx["graph"])
-    contested = contest_stage(df, schema, observation, investigation, user["uid"], llm=llm)
-    persona = body.persona or user.get("persona") or persona_for_role(user.get("role"))
-    action = act_stage(df, observation, investigation, contested, llm=llm,
-                       resolver=schema.contract_resolver, persona=persona)
-    result = {"stage": "act", "act": action}
+    with request_telemetry(user["uid"], "/api/act") as telemetry:
+        kpi, year, quarter, comparison, intent, clarification = _resolve_stage_target(user, ds, body)
+        if clarification:
+            return clarification
+        with track_processing_step("Load dataset", "Non-LLM Processing"):
+            df, schema = dataset_service.load(ds, user["uid"])
+        observation = _guard(pipeline.run_observe, ds, kpi, year, quarter, comparison, user["uid"])
+        ctx = pipeline.prepare_stage_context(df, schema, observation, intent, comparison)
+        llm = get_llm() if body.use_llm else None
+        with track_processing_step("Investigate", "Non-LLM Processing"):
+            investigation = investigate_stage(df, schema, observation, user["uid"], llm=llm,
+                                              signals=ctx["signals"], graph=ctx["graph"])
+        with track_processing_step("Contest", "Non-LLM Processing"):
+            contested = contest_stage(df, schema, observation, investigation, user["uid"], llm=llm)
+        persona = body.persona or user.get("persona") or persona_for_role(user.get("role"))
+        with track_processing_step("Act", "Non-LLM Processing"):
+            action = act_stage(df, observation, investigation, contested, llm=llm,
+                               resolver=schema.contract_resolver, persona=persona)
+    result = {"stage": "act", "act": action, "telemetry": telemetry.saved}
     if intent:
         result["intent"] = intent.model_dump()
     return result
@@ -219,8 +239,10 @@ def run_investigation(body: AnalysisRequest,
     """
     ds = _dataset_for(user, body.dataset_id)
     persona = user.get("persona") or persona_for_role(user.get("role"))
-    result = _guard(pipeline.run_full, user["uid"], ds, body.kpi, body.year, body.quarter,
-                    body.comparison, body.persist, body.use_llm, persona)
+    with request_telemetry(user["uid"], "/api/investigations/run") as telemetry:
+        result = _guard(pipeline.run_full, user["uid"], ds, body.kpi, body.year, body.quarter,
+                        body.comparison, body.persist, body.use_llm, persona)
+    result["telemetry"] = telemetry.saved
     return redact_result(result, user)
 
 
@@ -257,11 +279,49 @@ def investigate_question(body: QuestionRequest,
     """
     ds = _dataset_for(user, body.dataset_id)
     persona = body.persona or user.get("persona") or persona_for_role(user.get("role"))
-    result = _guard(pipeline.run_question, user["uid"], ds, body.question,
-                    persona=persona, persist=body.persist, use_llm=body.use_llm)
-    if result.get("status") == "needs_clarification":
-        return result
+    with request_telemetry(user["uid"], "/api/questions/investigate") as telemetry:
+        result = _guard(pipeline.run_question, user["uid"], ds, body.question,
+                        persona=persona, persist=body.persist, use_llm=body.use_llm)
+        if result.get("status") == "needs_clarification":
+            return result
+    result["telemetry"] = telemetry.saved
     return redact_result(result, user)
+
+
+@router.get("/telemetry/summary")
+def telemetry_summary(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    records = TelemetryRepository().list_for_user(user["uid"])
+    count = len(records)
+    latencies = sorted(r.get("latency_ms", 0) for r in records)
+    p95 = latencies[max(0, int((count - 1) * 0.95))] if count else 0
+    total = lambda key: sum(r.get(key, 0) or 0 for r in records)
+    successes = sum(r.get("status") == "success" for r in records)
+    return {
+        "total_requests": count, "successful_requests": successes, "failed_requests": count - successes,
+        "average_latency_ms": round(total("latency_ms") / count) if count else 0, "p95_latency_ms": p95,
+        "total_model_calls": total("model_calls"), "average_model_calls": round(total("model_calls") / count, 2) if count else 0,
+        "total_input_tokens": total("input_tokens"), "total_output_tokens": total("output_tokens"), "total_tokens": total("total_tokens"),
+        "total_prompt_tokens": total("prompt_tokens") or total("input_tokens"),
+        "total_completion_tokens": total("completion_tokens") or total("output_tokens"),
+        "average_input_tokens": round(total("input_tokens") / count) if count else 0,
+        "average_output_tokens": round(total("output_tokens") / count) if count else 0,
+        "average_total_tokens": round(total("total_tokens") / count) if count else 0,
+        "estimated_total_cost": round(total("estimated_cost"), 6),
+        "average_cost_per_request": round(total("estimated_cost") / count, 6) if count else 0,
+        "total_llm_duration_ms": sum((r.get("processing", {}).get("llm", {}).get("duration_ms") or 0) for r in records),
+        "total_non_llm_duration_ms": sum((r.get("processing", {}).get("non_llm", {}).get("duration_ms") or 0) for r in records),
+        "cost_estimated": True,
+    }
+
+
+@router.get("/telemetry/recent")
+def telemetry_recent(limit: int = Query(default=10, ge=1, le=50),
+                     user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    records = TelemetryRepository().list_for_user(user["uid"], limit=limit)
+    fields = ("trace_id", "timestamp", "start_time", "end_time", "duration_ms", "endpoint", "model_name", "model_calls",
+              "input_tokens", "output_tokens", "prompt_tokens", "completion_tokens", "total_tokens", "estimated_cost", "latency_ms", "llm_latency_ms",
+              "processing", "status", "error_type", "errors")
+    return {"telemetry": [{key: item.get(key) for key in fields} for item in records]}
 
 
 @router.get("/investigations")

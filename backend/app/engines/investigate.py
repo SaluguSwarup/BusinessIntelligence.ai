@@ -203,6 +203,20 @@ def investigate(df: pd.DataFrame, schema: DatasetSchema, observation: Dict[str, 
         observation=observation, focus=determine_focus(observation),
     )
 
+    # Not enough history for the significance test to qualify the movement in the
+    # first place. Proposing mechanisms here would be explaining a number the
+    # engine has already said it cannot stand behind.
+    if observation.get("history_status") != "sufficient_history":
+        return {
+            "focus": {}, "focus_label": "", "hypotheses": [], "considered_count": 0,
+            "not_carried_forward": [], "documents_indexed": 0, "rag_available": False,
+            "llm_used": False, "llm_note": None,
+            "nothing_to_explain": True,
+            "signal_filter": {},
+            "method_note": ((observation.get("history_note") or "")
+                            + " No causal hypotheses or confidence scores were generated.").strip(),
+        }
+
     if graph is None:
         graph = build_driver_graph(schema, ctx.metric, observation)
     if signals is None:

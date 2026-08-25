@@ -21,6 +21,16 @@ ANALYST_ONLY_SIGNIFICANCE = [
 ]
 ANALYST_ONLY_SCORING = ["score_ledger", "support_score", "against_score", "missing_penalty"]
 
+# How a driver was RANKED is analyst detail: the score components, the member's
+# robust z against its own history, the Shapley axis weighting. A leader still
+# sees which drivers came out on top, their rank, and their contribution -- the
+# finding -- without the arithmetic that produced the ordering.
+ANALYST_ONLY_DRIVER = [
+    "score_components", "member_score", "axis_weight", "score_weight_used",
+    "member_robust_z", "member_significance_note", "weeks_outside_band",
+    "weeks_in_period", "persistence_note", "method",
+]
+
 # A leader reads the KPI Contract to understand what a number means; the machinery
 # that produced the proposal — the row-level checks, the derivation rule, the
 # confidence internals — is analyst detail.
@@ -79,6 +89,14 @@ def redact_observation(observation: Dict[str, Any], analyst: bool) -> Dict[str, 
         sig.pop(key, None)
     sig["explanation"] = _plain_significance(observation)
     out["drivers"] = {}                     # leaders get `top_drivers` only
+
+    # The ranking survives; the machinery behind it does not.
+    for driver in out.get("top_drivers") or []:
+        for key in ANALYST_ONLY_DRIVER:
+            driver.pop(key, None)
+    out.pop("dimension_shapley", None)
+    out.pop("dimension_ranking", None)
+
     out["analyst_view_available"] = True
     return out
 

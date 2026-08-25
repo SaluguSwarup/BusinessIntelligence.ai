@@ -28,6 +28,7 @@ from ..engines.signals import material_signals
 from ..llm.client import get_llm
 from ..query import interpret_question_cached
 from . import dataset_service
+from .telemetry import track_processing_step
 
 
 # The headline KPI a business would lead with, in order of preference. Revenue
@@ -77,15 +78,16 @@ def resolve_timeframe(df, year: Optional[int], quarter: Optional[int]) -> Timefr
 def run_observe(dataset: Dict[str, Any], metric: Optional[str], year: Optional[int],
                 quarter: Optional[int], comparison: str = "previous_period",
                 uid: Optional[str] = None) -> Dict[str, Any]:
-    df, schema = dataset_service.load(dataset, uid)
-    kpi = metric or default_kpi(schema)
-    if kpi not in schema.available_kpis:
-        raise ValueError(
-            f"'{kpi}' is not an approved KPI for this dataset. Available: "
-            f"{', '.join(schema.available_kpis)}. Define or approve it in the KPI contract."
-        )
-    tf = resolve_timeframe(df, year, quarter)
-    return observe(df, schema, kpi, tf, comparison)
+    with track_processing_step("Observe", "Non-LLM Processing"):
+        df, schema = dataset_service.load(dataset, uid)
+        kpi = metric or default_kpi(schema)
+        if kpi not in schema.available_kpis:
+            raise ValueError(
+                f"'{kpi}' is not an approved KPI for this dataset. Available: "
+                f"{', '.join(schema.available_kpis)}. Define or approve it in the KPI contract."
+            )
+        tf = resolve_timeframe(df, year, quarter)
+        return observe(df, schema, kpi, tf, comparison)
 
 
 def prepare_stage_context(df, schema, observation: Dict[str, Any],
@@ -114,7 +116,8 @@ def run_full(uid: str, dataset: Dict[str, Any], metric: Optional[str], year: Opt
              persona: Optional[str] = None, question: str = "",
              intent: Optional[Any] = None) -> Dict[str, Any]:
     started = time.time()
-    df, schema = dataset_service.load(dataset, uid)
+    with track_processing_step("Load dataset", "Non-LLM Processing"):
+        df, schema = dataset_service.load(dataset, uid)
     llm = get_llm() if use_llm else None
 
     observation = run_observe(dataset, metric, year, quarter, comparison, uid)
@@ -126,17 +129,20 @@ def run_full(uid: str, dataset: Dict[str, Any], metric: Optional[str], year: Opt
     comparisons, graph, signals = ctx["comparisons"], ctx["graph"], ctx["signals"]
 
     t = time.time()
-    investigation = investigate(df, schema, observation, uid, llm=llm,
-                                signals=signals, graph=graph)
+    with track_processing_step("Investigate", "Non-LLM Processing"):
+        investigation = investigate(df, schema, observation, uid, llm=llm,
+                                    signals=signals, graph=graph)
     stage_times["investigate"] = round(time.time() - t, 3)
 
     t = time.time()
-    contested = contest(df, schema, observation, investigation, uid, llm=llm)
+    with track_processing_step("Contest", "Non-LLM Processing"):
+        contested = contest(df, schema, observation, investigation, uid, llm=llm)
     stage_times["contest"] = round(time.time() - t, 3)
 
     t = time.time()
-    action = act(df, observation, investigation, contested, llm=llm,
-                 resolver=schema.contract_resolver, persona=persona)
+    with track_processing_step("Act", "Non-LLM Processing"):
+        action = act(df, observation, investigation, contested, llm=llm,
+                     resolver=schema.contract_resolver, persona=persona)
     stage_times["act"] = round(time.time() - t, 3)
 
     result = {

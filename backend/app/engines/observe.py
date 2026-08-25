@@ -16,6 +16,14 @@ import numpy as np
 import pandas as pd
 
 from ..config import get_settings
+from .drivers import (
+    axis_weights,
+    cell_delta_grid,
+    rank_dimensions,
+    rank_drivers,
+    robust_sigma as _robust_sigma_impl,
+    shapley_dimension_attribution,
+)
 from .metrics import (
     DatasetSchema,
     Resolver,
@@ -116,15 +124,13 @@ def weekly_series(df: pd.DataFrame, metric: str, tf: Optional[Timeframe] = None,
 # significance
 # ---------------------------------------------------------------------------
 def _robust_sigma(values: np.ndarray) -> Tuple[float, float]:
-    """(median, robust sigma) using the median absolute deviation."""
-    if len(values) == 0:
-        return float("nan"), float("nan")
-    med = float(np.median(values))
-    mad = float(np.median(np.abs(values - med)))
-    sigma = 1.4826 * mad
-    if sigma <= 1e-9:                              # degenerate MAD -> fall back to std
-        sigma = float(np.std(values, ddof=1)) if len(values) > 1 else float("nan")
-    return med, sigma
+    """
+    (median, robust sigma) using the median absolute deviation.
+
+    Defined once in `drivers.robust_sigma` so the KPI's significance test and the
+    per-member significance test cannot drift apart.
+    """
+    return _robust_sigma_impl(values)
 
 
 def assess_significance(series: List[Dict[str, Any]], tf: Timeframe,
@@ -167,6 +173,18 @@ def assess_significance(series: List[Dict[str, Any]], tf: Timeframe,
     same_q = np.array([c["change_pct"] for c in history if c["quarter"] == (tf.quarter or 0)
                        and c["change_pct"] == c["change_pct"]])
 
+    history_status = "newly_launched" if current is None else (
+        "sparse_history" if len(hist_all) < s.min_history_comparisons else "sufficient_history"
+    )
+    history_note = (
+        "This KPI is newly launched for the selected period. Its current value is available, but there is no prior "
+        "period for historical trend analysis."
+        if history_status == "newly_launched" else
+        (f"Only {len(hist_all)} historical comparison period(s) are available; at least "
+         f"{s.min_history_comparisons} are required for trend and normal-variation analysis."
+         if history_status == "sparse_history" else None)
+    )
+
     med_all, sig_all = _robust_sigma(hist_all)
     med_seasonal, sig_seasonal = _robust_sigma(same_q)
 
@@ -208,7 +226,11 @@ def assess_significance(series: List[Dict[str, Any]], tf: Timeframe,
     statistically_unusual = abs(z) >= s.anomaly_z_threshold if z == z else False
     is_anomaly = bool(material and statistically_unusual)
 
-    if len(hist_all) < 4:
+    if history_status == "newly_launched":
+        power = history_note
+    elif history_status == "sparse_history":
+        power = history_note
+    elif len(hist_all) < 4:
         power = ("Weak: fewer than 4 historical comparison periods, so 'normal variation' is "
                  "estimated from very little data. Treat the verdict as indicative.")
     elif not seasonal_ok and (tf.quarter is not None):
@@ -217,7 +239,13 @@ def assess_significance(series: List[Dict[str, Any]], tf: Timeframe,
     else:
         power = "Good: the comparison is restricted to the same quarter transition in previous years."
 
-    if is_anomaly:
+    if history_status != "sufficient_history":
+        verdict = history_status
+        is_anomaly = material = statistically_unusual = False
+        expected_value = band = None
+        z = med = sigma = float("nan")
+        method = "insufficient_history"
+    elif is_anomaly:
         verdict = "meaningful_signal"
     elif material and not statistically_unusual:
         verdict = "within_normal_variation"
@@ -228,6 +256,8 @@ def assess_significance(series: List[Dict[str, Any]], tf: Timeframe,
 
     return {
         "method": method,
+        "history_status": history_status,
+        "history_note": history_note,
         "comparison": comparison,
         "current_period": cur_key,
         "baseline_period": base_key,
@@ -382,21 +412,27 @@ def observe(df: pd.DataFrame, schema: DatasetSchema, metric: str, tf: Timeframe,
                 drivers[dim] = decompose_dimension(cur, base, dim, metric,
                                                   s.max_drivers_per_dimension, resolver)
 
-    top: List[Dict[str, Any]] = []
-    for dim, rows in drivers.items():
-        for r in rows:
-            if r.get("is_aggregate"):
-                continue
-            top.append({**r, "dimension": dim})
     unfavourable = (change_abs or 0) < 0 if higher_is_better(metric, resolver) else (change_abs or 0) > 0
-    top = [t for t in top if t["contribution_pct"] is not None and t["contribution_pct"] > 0]
-    # A member that contributes in line with its own size is arithmetic, not a driver.
-    # Rank by how much it OVER-contributes, then by absolute contribution.
-    top.sort(key=lambda r: ((r.get("over_index") or 1.0) >= 1.2, r["contribution_pct"]), reverse=True)
-    for t in top:
-        oi = t.get("over_index")
-        t["is_disproportionate"] = bool(oi is not None and oi >= 1.2)
-    top = top[:6]
+
+    # Which dimension the movement is actually shaped by. Exact Shapley over the
+    # cell grid, so the interaction between two dimensions is split between them
+    # rather than counted once for each -- which is what reading the per-dimension
+    # decompositions side by side silently does. Computed BEFORE ranking, because
+    # it decides how much each dimension's members are allowed to count.
+    cells = cell_delta_grid(cur, base, schema.dimensions, metric, resolver) if len(base) else []
+    dimension_shapley = shapley_dimension_attribution(cells, [
+        d for d in schema.dimensions if d in cur.columns and d in base.columns
+    ]) if cells else {}
+    dimension_ranking = rank_dimensions(dimension_shapley) if dimension_shapley else []
+
+    # Ranking a member on contribution alone makes the biggest segment the
+    # "driver" of everything; ranking on over-index alone makes the noisiest
+    # small one the driver. `rank_drivers` scores four things together --
+    # contribution, over-index, the member's significance against its OWN
+    # history, and whether it stayed moved -- and publishes the arithmetic on
+    # every row. See docs/RANKING.md.
+    top = rank_drivers(drivers, df, metric, tf, resolver, limit=6,
+                       axis=axis_weights(dimension_shapley))
 
     concentration = None
     if drivers:
@@ -443,9 +479,13 @@ def observe(df: pd.DataFrame, schema: DatasetSchema, metric: str, tf: Timeframe,
         "is_unfavourable": bool(unfavourable),
         "anomaly": significance["is_anomaly"],
         "verdict": significance["verdict"],
+        "history_status": significance["history_status"],
+        "history_note": significance["history_note"],
         "significance": significance,
         "drivers": drivers,
         "top_drivers": top,
+        "dimension_shapley": dimension_shapley,
+        "dimension_ranking": dimension_ranking,
         "driver_concentration_pct": concentration,
         "series": {
             "quarterly": series,

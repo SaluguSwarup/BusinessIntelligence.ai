@@ -264,6 +264,7 @@ def act(df: pd.DataFrame, observation: Dict[str, Any], investigation: Dict[str, 
     base_tf = observation["baseline_timeframe"]["pretty"]
     change = _fmt_change(observation)
     verdict = observation["verdict"]
+    limited_history = observation.get("history_status") != "sufficient_history"
 
     q_now = observation["timeframe"].get("quarter")
     q_base = observation["baseline_timeframe"].get("quarter")
@@ -279,6 +280,8 @@ def act(df: pd.DataFrame, observation: Dict[str, Any], investigation: Dict[str, 
         "statistically_unusual_but_immaterial": (
             "The move is statistically unusual but too small to be commercially material."),
     }.get(verdict, "")
+    if limited_history:
+        significance_sentence = observation.get("history_note") or "Historical trend analysis is unavailable."
 
     all_drivers = observation.get("top_drivers", [])
     # A part of the business that moved exactly in line with its own size is arithmetic,
@@ -293,7 +296,11 @@ def act(df: pd.DataFrame, observation: Dict[str, Any], investigation: Dict[str, 
             parts.append(f"{d['name']} ({d['dimension']}, {d['contribution_pct']:.0f}% of the change{idx})")
         driver_sentence = "The change is concentrated in " + "; ".join(parts) + "."
 
-    if top:
+    if limited_history:
+        headline_expl = "No causal explanation or confidence score was generated because historical evidence is insufficient."
+    elif contested.get("clarification_request") and top and top["scoring"]["confidence"] < 45:
+        headline_expl = "No explanation has sufficient evidence to attribute a root cause. Clarification is required before acting."
+    elif top:
         headline_expl = (
             f"The strongest-evidenced explanation is “{top['title']}” at {top['scoring']['confidence']}% "
             f"evidence-based confidence ({top['scoring']['confidence_band']}). "
@@ -311,10 +318,24 @@ def act(df: pd.DataFrame, observation: Dict[str, Any], investigation: Dict[str, 
     uncertainty.extend(contested.get("unresolved_questions", [])[:3])
 
     recommendations = build_recommendations(df, observation, contested, focus_label, resolver)
+    if contested.get("clarification_request") and top and top["scoring"]["confidence"] < 45:
+        recommendations = []
+    if limited_history:
+        recommendations = [{
+            "id": "rec_history_baseline", "title": "Establish a KPI baseline", "priority": "low",
+            "horizon": "next reporting periods", "owner": "KPI owner",
+            "actions": ["Continue collecting this KPI across reporting periods before drawing trend or causal conclusions."],
+            "rationale": observation.get("history_note"),
+            "based_on": {"hypothesis": "Insufficient historical data", "confidence": None, "band": "not assessed"},
+            "supporting_evidence": [], "documentary_evidence": [], "counter_evidence": [], "monitoring": [],
+            "what_would_change_this": ["Collect enough period-over-period history to establish a baseline."],
+        }]
 
     narrative = {
-        "headline": f"{kpi_label} {('fell' if (observation.get('change_pct') or 0) < 0 else 'rose')} "
-                    f"{change} in {tf} versus {base_tf}.",
+        "headline": (f"{kpi_label}: {observation.get('history_status', '').replace('_', ' ')}."
+                     if limited_history else
+                     f"{kpi_label} {('fell' if (observation.get('change_pct') or 0) < 0 else 'rose')} "
+                     f"{change} in {tf} versus {base_tf}."),
         "what_changed": (
             f"{kpi_label} moved from {observation['baseline_value']:,.0f} in {base_tf} to "
             f"{observation['current_value']:,.0f} in {tf} ({change})."
@@ -328,7 +349,7 @@ def act(df: pd.DataFrame, observation: Dict[str, Any], investigation: Dict[str, 
     }
 
     llm_story = None
-    if llm is not None and llm.enabled:
+    if not limited_history and llm is not None and llm.enabled:
         try:
             llm_story = llm.write_story(observation, investigation, contested, recommendations)
         except Exception as exc:
@@ -347,6 +368,7 @@ def act(df: pd.DataFrame, observation: Dict[str, Any], investigation: Dict[str, 
         "narrative": narrative,
         "recommendations": recommendations,
         "ranking": ranking,
+        "clarification_request": contested.get("clarification_request"),
         "llm_story": llm_story,
         "persona_view": persona_view,
         "generated_from": {
