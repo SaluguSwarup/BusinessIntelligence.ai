@@ -102,8 +102,8 @@ def temporal_check(df: pd.DataFrame, kpi: str, hypothesis: Dict[str, Any],
             "lag_weeks": None, "cause_metric": None,
         }
     scoped = _scoped(window, focus)
-    kpi_weeks = weekly_frame(scoped, kpi)
-    cause_weeks = weekly_frame(scoped, cause_metric)
+    kpi_weeks = weekly_frame(scoped, kpi, resolver)
+    cause_weeks = weekly_frame(scoped, cause_metric, resolver)
     baseline_weeks = max(6, min(10, len(kpi_weeks) // 3))
     kpi_dir = "down" if (hypothesis.get("kpi_direction") or "down") == "down" else "up"
     kpi_onset = detect_onset(kpi_weeks, baseline_weeks=baseline_weeks, direction=kpi_dir)
@@ -126,7 +126,7 @@ def consistency_check(cur: pd.DataFrame, base: pd.DataFrame, schema: DatasetSche
     if not dim or not cause_metric:
         return {"status": "not_applicable",
                 "detail": "No dimension or no single driver series available for a cross-sectional test."}
-    table = member_change_table(cur, base, dim, [kpi, cause_metric])
+    table = member_change_table(cur, base, dim, [kpi, cause_metric], schema.contract_resolver)
     corr = correlate(table, kpi, cause_metric)
     counter = counterexamples(
         table, kpi, cause_metric,
