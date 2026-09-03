@@ -13,6 +13,7 @@ log = logging.getLogger(__name__)
 
 from ..config import get_settings
 from ..db.repositories import DatasetRepository, now_iso
+from ..agent.dimensions import MemberCatalogue
 from ..engines.metrics import DatasetSchema, detect_schema, prepare
 
 _CACHE: Dict[str, Tuple[float, pd.DataFrame, DatasetSchema]] = {}
@@ -385,6 +386,10 @@ def load(dataset: Dict[str, Any], uid: Optional[str] = None,
         df_raw = pd.read_csv(path)
         schema = detect_schema(df_raw)
         df = prepare(df_raw, schema, preserve_missing=bool(dataset.get("sources")))
+        # Built once per (path, mtime) and shared by every `replace(schema)`
+        # copy below. The catalogue computes nothing until it is asked, so
+        # attaching it here costs a constructor call, not a pass over the frame.
+        schema.member_catalogue = MemberCatalogue(df, schema.dimensions)
         _CACHE[path] = (mtime, df, schema)
 
     if uid or dataset.get("sources"):
